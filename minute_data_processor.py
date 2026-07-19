@@ -72,11 +72,34 @@ class MinuteDataProcessor:
         """获取昨日全天成交量
 
         优先使用传入的 daily_df（来自 StockFilter 缓存），避免重复请求。
+
+        关键修复：判断日线最后一行是否为今日，避免实盘 10:00 执行时
+        BaoStock 盘前未更新今日行导致昨日量取成前日量。
+
+        判断逻辑：
+          - 实盘模式（Config.TARGET_DATE=None）：target_date_str = 今日
+            * BaoStock 盘前未更新：iloc[-1]=昨日 → 返回 iloc[-1]
+            * 新浪已更新今日：iloc[-1]=今日 → 返回 iloc[-2]
+          - 回测模式（Config.TARGET_DATE='YYYY-MM-DD'）：target_date_str = 目标日期
+            * 数据已含目标日期行：iloc[-1]=目标日期 → 返回 iloc[-2]
+            * 数据未含目标日期行（极少见）：iloc[-1]=目标日期前一日 → 返回 iloc[-1]
         """
         # 优先复用已缓存的日线数据
         if daily_df is not None and len(daily_df) >= 2:
             try:
-                return float(daily_df.iloc[-2]['volume'])
+                target_date_str = get_target_date_str()
+                last_date_str = str(daily_df.iloc[-1]['date'])[:10]
+
+                if last_date_str == target_date_str:
+                    # 最后一行是今日（或回测目标日期），昨日为倒数第二行
+                    return float(daily_df.iloc[-2]['volume'])
+                else:
+                    # 最后一行不是今日（盘前未更新），最后一行即昨日
+                    logger.info(
+                        f"股票 {code} 日线最后一行 {last_date_str} 非目标日期 {target_date_str}，"
+                        f"昨日成交量取最后一行: {daily_df.iloc[-1]['volume']}"
+                    )
+                    return float(daily_df.iloc[-1]['volume'])
             except Exception:
                 pass
 
@@ -119,8 +142,17 @@ class MinuteDataProcessor:
             if df is not None and len(df) >= 2:
                 df = rename_columns(df, COLUMN_MAP_HIST)
                 df = df.sort_values('date')
-                yesterday_volume = df.iloc[-2]['volume']
-                return float(yesterday_volume)
+                # 同样的判断逻辑：最后一行是否为今日
+                target_date_str = get_target_date_str()
+                last_date_str = str(df.iloc[-1]['date'])[:10]
+                if last_date_str == target_date_str:
+                    return float(df.iloc[-2]['volume'])
+                else:
+                    logger.info(
+                        f"股票 {code} 降级日线最后一行 {last_date_str} 非目标日期 {target_date_str}，"
+                        f"昨日成交量取最后一行: {df.iloc[-1]['volume']}"
+                    )
+                    return float(df.iloc[-1]['volume'])
             return 0
         except Exception as e:
             logger.error(f"获取股票 {code} 昨日成交量异常: {e}")

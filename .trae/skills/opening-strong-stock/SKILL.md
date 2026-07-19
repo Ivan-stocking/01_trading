@@ -52,6 +52,138 @@ python3 test_backtest.py 2026-07-16   # 回测 7月16日
 
 **已知局限**：新浪 spot 接口只返回最新交易日的实时涨幅，因此不同日期的回测会得到相同的市场环境（全A涨幅、板块涨幅相同），仅日线/周线/分时数据是真正按目标日期获取的。
 
+### 成交量判断说明（关键）
+
+**所有成交量判断都严格基于 09:30-10:00 的早盘数据，与执行时刻无关。**
+
+| 执行时刻 | 新浪分时返回范围 | 实际用于判断的数据 |
+|---------|----------------|------------------|
+| 10:00 | 09:31-10:00（30 分钟） | 09:30-10:00（30 分钟） |
+| 11:00 | 09:31-11:00（90 分钟） | **09:30-10:00**（过滤后） |
+| 14:00 | 09:31-14:00（270 分钟） | **09:30-10:00**（过滤后） |
+
+通过 [minute_data_processor.py](file:///Users/ivan/Documents/trae_work/01_trading/minute_data_processor.py) 的 `filter_trading_minutes(df, "09:30", "10:00")` 严格截断，10:01 之后的分钟不参与任何判断。
+
+**三种成交量判断的数据来源**：
+
+| 判断项 | 分子 | 分母 |
+|--------|------|------|
+| 早盘量能 | 09:30-10:00 成交量之和 | 昨日全天成交量 |
+| 缩量回踩 | 09:30-10:00 内回踩段均量 vs 上涨段均量 | 无 |
+| 补丁1 | 09:45-10:00 最低价、低于均价分钟数 | 无 |
+
+**昨日成交量的智能取值**（关键修复）：
+
+实盘 10:00 执行时，BaoStock 可能尚未更新今日行，导致 `iloc[-2]` 会取到前日量。`fetch_yesterday_volume` 通过比较日线最后一行日期与目标日期来智能选择：
+
+| 场景 | 日线最后一行 | 取量位置 | 返回值 |
+|------|------------|---------|-------|
+| 实盘 BaoStock 未更新今日 | 昨日 | `iloc[-1]` | 昨日量 ✅ |
+| 实盘 新浪已更新今日 | 今日 | `iloc[-2]` | 昨日量 ✅ |
+| 回测模式 | 目标日期 | `iloc[-2]` | 目标日期前一日量 ✅ |
+
+实盘盘前执行时日志会打印：
+```
+股票 002396 日线最后一行 2026-07-16 非目标日期 2026-07-19，昨日成交量取最后一行: 175864554
+```
+
+**修复代码位置**：[minute_data_processor.py](file:///Users/ivan/Documents/trae_work/01_trading/minute_data_processor.py) 的 `fetch_yesterday_volume` 方法
+
+**修复前的代码（有 bug）**：
+
+```python
+def fetch_yesterday_volume(self, code, daily_df=None):
+    # 优先复用已缓存的日线数据
+    if daily_df is not None and len(daily_df) >= 2:
+        try:
+            # BUG: 无条件取倒数第二行，实盘盘前 BaoStock 未更新今日时
+            # iloc[-1]=昨日, iloc[-2]=前日 → 昨日量被取成前日量
+            return float(daily_df.iloc[-2]['volume'])
+        except Exception:
+            pass
+
+    # 降级：独立请求日线数据
+    try:
+        # ... 请求逻辑略 ...
+        if df is not None and len(df) >= 2:
+            df = rename_columns(df, COLUMN_MAP_HIST)
+            df = df.sort_values('date')
+            yesterday_volume = df.iloc[-2]['volume']  # BUG: 同样的问题
+            return float(yesterday_volume)
+        return 0
+    except Exception as e:
+        logger.error(f"获取股票 {code} 昨日成交量异常: {e}")
+        return 0
+```
+
+**修复后的代码（正确）**：
+
+```python
+def fetch_yesterday_volume(self, code, daily_df=None):
+    """获取昨日全天成交量
+
+    关键修复：判断日线最后一行是否为今日，避免实盘 10:00 执行时
+    BaoStock 盘前未更新今日行导致昨日量取成前日量。
+
+    判断逻辑：
+      - 实盘模式（Config.TARGET_DATE=None）：target_date_str = 今日
+        * BaoStock 盘前未更新：iloc[-1]=昨日 → 返回 iloc[-1]
+        * 新浪已更新今日：iloc[-1]=今日 → 返回 iloc[-2]
+      - 回测模式（Config.TARGET_DATE='YYYY-MM-DD'）：target_date_str = 目标日期
+        * 数据已含目标日期行：iloc[-1]=目标日期 → 返回 iloc[-2]
+        * 数据未含目标日期行（极少见）：iloc[-1]=目标日期前一日 → 返回 iloc[-1]
+    """
+    # 优先复用已缓存的日线数据
+    if daily_df is not None and len(daily_df) >= 2:
+        try:
+            target_date_str = get_target_date_str()
+            last_date_str = str(daily_df.iloc[-1]['date'])[:10]
+
+            if last_date_str == target_date_str:
+                # 最后一行是今日（或回测目标日期），昨日为倒数第二行
+                return float(daily_df.iloc[-2]['volume'])
+            else:
+                # 最后一行不是今日（盘前未更新），最后一行即昨日
+                logger.info(
+                    f"股票 {code} 日线最后一行 {last_date_str} 非目标日期 {target_date_str}，"
+                    f"昨日成交量取最后一行: {daily_df.iloc[-1]['volume']}"
+                )
+                return float(daily_df.iloc[-1]['volume'])
+        except Exception:
+            pass
+
+    # 降级：独立请求日线数据（优先东财，失败用新浪）
+    try:
+        # ... 请求逻辑略 ...
+        if df is not None and len(df) >= 2:
+            df = rename_columns(df, COLUMN_MAP_HIST)
+            df = df.sort_values('date')
+            # 同样的判断逻辑：最后一行是否为今日
+            target_date_str = get_target_date_str()
+            last_date_str = str(df.iloc[-1]['date'])[:10]
+            if last_date_str == target_date_str:
+                return float(df.iloc[-2]['volume'])
+            else:
+                logger.info(
+                    f"股票 {code} 降级日线最后一行 {last_date_str} 非目标日期 {target_date_str}，"
+                    f"昨日成交量取最后一行: {df.iloc[-1]['volume']}"
+                )
+                return float(df.iloc[-1]['volume'])
+        return 0
+    except Exception as e:
+        logger.error(f"获取股票 {code} 昨日成交量异常: {e}")
+        return 0
+```
+
+**关键依赖**：`get_target_date_str()` 函数（来自 [config.py](file:///Users/ivan/Documents/trae_work/01_trading/config.py)），实盘模式返回今日 `YYYY-MM-DD`，回测模式返回 `Config.TARGET_DATE`。
+
+**验证结果**：
+
+| 场景 | 日线最后一行 | 返回值 | 是否正确 |
+|------|------------|-------|---------|
+| 回测模式 TARGET_DATE=2026-07-17 | 2026-07-17 | 175864554 (07-16量) | ✅ |
+| 模拟实盘盘前未更新（移除最后一行） | 2026-07-16 | 175864554 (07-16量) | ✅ |
+
 ### 模式 3：诊断模式（排查 0 只通过）
 
 当回测返回 0 只股票通过时，用此模式分析前 N 只股票的具体失败原因分布。
