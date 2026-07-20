@@ -331,13 +331,14 @@ class StockFilter:
             if pd.isna(latest['ma5']) or pd.isna(latest['ma10']) or pd.isna(latest['ma20']):
                 return False, "均线数据缺失"
 
-            if not (latest['ma5'] >= latest['ma20']):
+            if not (latest['ma5'] > latest['ma10'] > latest['ma20']):
                 return False, "均线未呈多头排列"
 
             ma5_slope = latest['ma5'] - df.iloc[-5]['ma5']
-            ma20_slope = latest['ma20'] - df.iloc[-10]['ma20']
+            ma10_slope = latest['ma10'] - df.iloc[-10]['ma10']
+            ma20_slope = latest['ma20'] - df.iloc[-20]['ma20']
 
-            if not (ma5_slope >= -1.0 and ma20_slope >= -1.0):
+            if not (ma5_slope > 0 and ma10_slope > 0 and ma20_slope > 0):
                 return False, "均线未向上倾斜"
 
             return True, "日线多头"
@@ -356,7 +357,7 @@ class StockFilter:
             if pd.isna(latest['ma5']) or pd.isna(latest['ma10']) or pd.isna(latest['ma20']):
                 return False, "周线均线数据缺失"
 
-            if latest['ma5'] >= latest['ma20']:
+            if latest['ma5'] > latest['ma10'] > latest['ma20']:
                 return True, "周线多头"
             return False, "周线未呈多头排列"
         except Exception as e:
@@ -510,7 +511,7 @@ class StockFilter:
         """检查个股在板块中的地位（涨幅是否大于板块均值）"""
         plate_avg = self.plate_analyzer.get_plate_avg_change(plate_name)
 
-        if stock_change >= plate_avg * 0.8:
+        if stock_change > plate_avg:
             return True, f"板块均值 {plate_avg:.2f}%, 个股涨幅 {stock_change:.2f}%"
         return False, f"板块均值 {plate_avg:.2f}%, 个股涨幅 {stock_change:.2f}%"
 
