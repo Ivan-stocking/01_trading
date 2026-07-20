@@ -138,7 +138,7 @@ COLUMN_MAP_INDEX = {
 
 # 概念板块数据列名映射（同花顺概念板块接口）
 COLUMN_MAP_CONCEPT = {
-    '概念名称': 'name', '代码': 'code', '涨跌幅': 'change_percent',
+    '板块名称': 'name', '代码': 'code', '涨跌幅': 'change_percent',
     '总市值': 'total_market_cap', '换手率': 'turnover',
     '上涨家数': 'rising_count', '下跌家数': 'falling_count',
     '领涨股票': 'leading_stock', '领涨股票-涨跌幅': 'leading_stock_change',
