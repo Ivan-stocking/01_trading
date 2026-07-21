@@ -74,12 +74,12 @@ class MinuteDataProcessor:
         优先使用传入的 daily_df（来自 StockFilter 缓存），避免重复请求。
 
         关键修复：判断日线最后一行是否为今日，避免实盘 10:00 执行时
-        BaoStock 盘前未更新今日行导致昨日量取成前日量。
+        数据源盘前未更新今日行导致昨日量取成前日量。
 
         判断逻辑：
           - 实盘模式（Config.TARGET_DATE=None）：target_date_str = 今日
-            * BaoStock 盘前未更新：iloc[-1]=昨日 → 返回 iloc[-1]
-            * 新浪已更新今日：iloc[-1]=今日 → 返回 iloc[-2]
+            * 数据源未更新今日：iloc[-1]=昨日 → 返回 iloc[-1]
+            * 数据源已更新今日：iloc[-1]=今日 → 返回 iloc[-2]
           - 回测模式（Config.TARGET_DATE='YYYY-MM-DD'）：target_date_str = 目标日期
             * 数据已含目标日期行：iloc[-1]=目标日期 → 返回 iloc[-2]
             * 数据未含目标日期行（极少见）：iloc[-1]=目标日期前一日 → 返回 iloc[-1]

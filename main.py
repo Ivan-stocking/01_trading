@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import Config
-from data_source import throttle, baostock_logout, check_eastmoney_available
+from data_source import throttle, check_eastmoney_available
 
 logging.basicConfig(
     level=getattr(logging, Config.LOG_LEVEL),
@@ -273,14 +273,10 @@ def run_filter():
 
         print_results_dual(plate_stocks, concept_stocks, all_a_index_change, plate_analyzer)
 
-        # 程序结束前登出 BaoStock（清理资源）
-        baostock_logout()
-
         return {'plate': plate_stocks, 'concept': concept_stocks}
 
     except Exception as e:
         logger.error(f"执行筛选程序异常: {e}", exc_info=True)
-        baostock_logout()
         return []
 
 

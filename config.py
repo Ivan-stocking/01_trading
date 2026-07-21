@@ -69,8 +69,6 @@ class Config:
     # ---- 板块成分股并发获取 ----
     PLATE_CONS_MAX_WORKERS = 10            # 线程池并发数（同花顺概念涨幅获取）
     STOCK_FILTER_MAX_WORKERS = 8           # 个股筛选线程池并发数
-    # 注：BaoStock 单 socket 连接通过 _bs_call_lock 串行化所有调用，
-    # 多线程在此锁处会排队，不影响其他数据源（新浪/同花顺）的并发。
 
     # ---- 网络请求超时与预检 ----
     # 单次 akshare 请求的 socket 超时（秒），避免东财接口不可用时长时间等待
@@ -80,11 +78,10 @@ class Config:
 
     # ---- 请求节流（防 IP 封禁）----
     # 同一数据源内两次请求的最小间隔（秒），不同数据源可并行
-    # 按数据源独立配置：东财风控严，新浪/同花顺中等，BaoStock 宽松
+    # 按数据源独立配置：东财风控严，新浪/同花顺中等
     REQUEST_INTERVAL_EASTMONEY = 2.0   # 东财 push2 风控严格
     REQUEST_INTERVAL_SINA = 1.0        # 新浪相对宽松
     REQUEST_INTERVAL_THS = 1.0         # 同花顺相对宽松
-    REQUEST_INTERVAL_BAOSTOCK = 0.2    # BaoStock 已通过 _bs_call_lock 串行化，间隔可降到0.2秒
     REQUEST_INTERVAL_DEFAULT = 1.0     # 默认间隔
 
     # ---- 股票范围限定 ----
