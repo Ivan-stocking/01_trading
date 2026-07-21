@@ -111,7 +111,7 @@ def run_debug_top(target_date, top_n):
     import main as main_module
     main_module.is_trading_day = lambda: True
 
-    from data_source import check_eastmoney_available, baostock_logout
+    from data_source import check_eastmoney_available
     check_eastmoney_available()
 
     from plate_analyzer import PlateAnalyzer
@@ -202,7 +202,6 @@ def run_debug_top(target_date, top_n):
             print(f"    分钟失败原因: {minute_result['reasons']}")
         print(f"    分钟详情: {minute_result['details']}")
 
-    baostock_logout()
 
 
 def main():

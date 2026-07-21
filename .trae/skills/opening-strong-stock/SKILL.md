@@ -74,12 +74,12 @@ python3 test_backtest.py 2026-07-16   # 回测 7月16日
 
 **昨日成交量的智能取值**（关键修复）：
 
-实盘 10:00 执行时，BaoStock 可能尚未更新今日行，导致 `iloc[-2]` 会取到前日量。`fetch_yesterday_volume` 通过比较日线最后一行日期与目标日期来智能选择：
+实盘 10:00 执行时，数据源可能尚未更新今日行，导致 `iloc[-2]` 会取到前日量。`fetch_yesterday_volume` 通过比较日线最后一行日期与目标日期来智能选择：
 
 | 场景 | 日线最后一行 | 取量位置 | 返回值 |
 |------|------------|---------|-------|
-| 实盘 BaoStock 未更新今日 | 昨日 | `iloc[-1]` | 昨日量 ✅ |
-| 实盘 新浪已更新今日 | 今日 | `iloc[-2]` | 昨日量 ✅ |
+| 实盘数据源未更新今日 | 昨日 | `iloc[-1]` | 昨日量 ✅ |
+| 实盘数据源已更新今日 | 今日 | `iloc[-2]` | 昨日量 ✅ |
 | 回测模式 | 目标日期 | `iloc[-2]` | 目标日期前一日量 ✅ |
 
 实盘盘前执行时日志会打印：
@@ -96,7 +96,7 @@ def fetch_yesterday_volume(self, code, daily_df=None):
     # 优先复用已缓存的日线数据
     if daily_df is not None and len(daily_df) >= 2:
         try:
-            # BUG: 无条件取倒数第二行，实盘盘前 BaoStock 未更新今日时
+            # BUG: 无条件取倒数第二行，实盘盘前数据源未更新今日时
             # iloc[-1]=昨日, iloc[-2]=前日 → 昨日量被取成前日量
             return float(daily_df.iloc[-2]['volume'])
         except Exception:
@@ -123,12 +123,12 @@ def fetch_yesterday_volume(self, code, daily_df=None):
     """获取昨日全天成交量
 
     关键修复：判断日线最后一行是否为今日，避免实盘 10:00 执行时
-    BaoStock 盘前未更新今日行导致昨日量取成前日量。
+    数据源盘前未更新今日行导致昨日量取成前日量。
 
     判断逻辑：
       - 实盘模式（Config.TARGET_DATE=None）：target_date_str = 今日
-        * BaoStock 盘前未更新：iloc[-1]=昨日 → 返回 iloc[-1]
-        * 新浪已更新今日：iloc[-1]=今日 → 返回 iloc[-2]
+        * 数据源未更新今日：iloc[-1]=昨日 → 返回 iloc[-1]
+        * 数据源已更新今日：iloc[-1]=今日 → 返回 iloc[-2]
       - 回测模式（Config.TARGET_DATE='YYYY-MM-DD'）：target_date_str = 目标日期
         * 数据已含目标日期行：iloc[-1]=目标日期 → 返回 iloc[-2]
         * 数据未含目标日期行（极少见）：iloc[-1]=目标日期前一日 → 返回 iloc[-1]
@@ -206,8 +206,8 @@ python3 test_backtest.py 2026-07-17 --debug-top 100   # 诊断前 100 只
 ## 运行环境要求
 
 - Python 3.9+
-- 依赖：`akshare`、`baostock`、`pandas`、`numpy`（见 `requirements.txt`）
-- 网络：需访问新浪、同花顺、BaoStock 接口（东财 push2 API 受 IP 风控，会自动降级）
+- 依赖：`akshare`、`pandas`、`numpy`（见 `requirements.txt`）
+- 网络：需访问新浪、同花顺接口（东财 push2 API 受 IP 风控，会自动降级）
 
 ## 运行耗时
 
@@ -272,7 +272,6 @@ python3 test_backtest.py 2026-07-17 --debug-top 100   # 诊断前 100 只
 |--------|------|---------|
 | 新浪（akshare） | 实时行情、分时数据、日线数据 | 1.0s |
 | 同花顺（akshare） | 行业板块、概念板块 | 1.0s |
-| BaoStock | 日线/周线（回测首选，最稳定） | 0.2s |
 | 东财 push2 | 板块成分股（受 IP 风控，启动时检测，不可用则降级） | 2.0s |
 
 ## 项目结构
@@ -285,7 +284,7 @@ python3 test_backtest.py 2026-07-17 --debug-top 100   # 诊断前 100 只
 ├── plate_analyzer.py         # 板块分析
 ├── stock_filter.py           # 股票筛选
 ├── minute_data_processor.py  # 分时数据处理
-├── data_source.py            # 数据源管理（节流、降级、BaoStock 单连接锁）
+├── data_source.py            # 数据源管理（节流、降级）
 ├── README.md
 ├── agent.md
 └── requirements.txt

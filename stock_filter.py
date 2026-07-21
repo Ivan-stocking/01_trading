@@ -4,15 +4,9 @@ import numpy as np
 import logging
 from datetime import datetime, timedelta
 from config import Config, rename_columns, COLUMN_MAP_HIST, code_to_symbol, get_end_date, get_target_date_str
-from data_source import throttle, fetch_daily_via_baostock, fetch_weekly_via_baostock, baostock_logout, is_eastmoney_available
+from data_source import throttle, is_eastmoney_available
 
 logger = logging.getLogger(__name__)
-
-
-def is_baostock_available():
-    """检查 BaoStock 是否可用（模块导入 + 网络连接）"""
-    from data_source import is_baostock_enabled
-    return is_baostock_enabled()
 
 
 class StockFilter:
@@ -57,18 +51,16 @@ class StockFilter:
     def fetch_daily_data(self, code, days=60):
         """获取日线数据（带缓存）
 
-        智能降级链（根据东财可用性动态选择）：
-          - 东财可用：东财 → 新浪 → BaoStock
-          - 东财不可用：BaoStock（主源，最稳定） → 新浪
+        数据源降级链：
+          - 东财可用：东财 → 新浪
+          - 东财不可用：新浪
 
         原因：东财 push2 API 受 IP 级风控，启动时检测一次，不可用则
         全局禁用东财接口，避免每只股票都等待超时浪费 8-15 秒。
 
         回测模式（Config.TARGET_DATE 非空）下 end_date 设为 TARGET_DATE。
-        BaoStock 按日期回测时数据最完整、最稳定，且无 IP 风控。
 
-        节流：按数据源分组（eastmoney/sina/baostock），同源内串行 2 秒，
-        不同源可并行。
+        节流：按数据源分组（eastmoney/sina），同源内串行，不同源可并行。
         """
         code = str(code)
         # 如果已缓存且条数足够，直接返回
@@ -80,12 +72,9 @@ class StockFilter:
         end_date = get_end_date()
         if Config.TARGET_DATE:
             start_date = (datetime.strptime(Config.TARGET_DATE, '%Y-%m-%d') - timedelta(days=days * 2)).strftime('%Y%m%d')
-            bs_start_date = (datetime.strptime(Config.TARGET_DATE, '%Y-%m-%d') - timedelta(days=days * 2)).strftime('%Y-%m-%d')
-            bs_end_date = Config.TARGET_DATE
+            
         else:
             start_date = (datetime.now() - timedelta(days=days * 2)).strftime('%Y%m%d')
-            bs_start_date = (datetime.now() - timedelta(days=days * 2)).strftime('%Y-%m-%d')
-            bs_end_date = datetime.now().strftime('%Y-%m-%d')
 
         df = None
 
@@ -100,20 +89,7 @@ class StockFilter:
             except Exception:
                 pass
 
-        # 东财失败或东财不可用：优先 BaoStock（最稳定，支持按日期回测）
-        # 优化：当东财不可用时，跳过 BaoStock（网络环境可能有问题），直接走新浪
-        if df is None or df.empty:
-            # 只有东财可用时才尝试 BaoStock（说明网络环境正常）
-            if is_eastmoney_available() and is_baostock_available():
-                try:
-                    df = fetch_daily_via_baostock(code, bs_start_date, bs_end_date)
-                    if df is not None and not df.empty:
-                        logger.debug(f"股票 {code} 日线使用 BaoStock")
-                except Exception as e:
-                    logger.warning(f"股票 {code} BaoStock 日线失败: {e}")
-                    df = None
-
-        # BaoStock 也失败或不可用：最后降级新浪
+        # 东财失败或东财不可用：降级新浪
         if df is None or df.empty:
             try:
                 throttle('sina')
@@ -132,7 +108,7 @@ class StockFilter:
             df = rename_columns(df, COLUMN_MAP_HIST)
             df = df.sort_values('date')
 
-            # 新浪接口无 change_percent 列，需自行计算（BaoStock 已有 change_percent）
+            # 新浪接口无 change_percent 列，需自行计算
             if 'change_percent' not in df.columns:
                 df['change_percent'] = df['close'].pct_change() * 100
             if 'change_amount' not in df.columns:
@@ -151,10 +127,9 @@ class StockFilter:
     def fetch_weekly_data(self, code, weeks=25):
         """获取周线数据（带缓存）
 
-        三级降级链：
+        数据源降级链：
           1. AKShare 东财周线接口
           2. 从日线数据重采样为周线（W-FRI）
-          3. BaoStock 周线接口（frequency='w'）
 
         回测模式下 end_date 设为 TARGET_DATE。
         weeks 默认 25 周（确保足够计算 MA20 均线）。
@@ -168,12 +143,9 @@ class StockFilter:
         end_date = get_end_date()
         if Config.TARGET_DATE:
             start_date = (datetime.strptime(Config.TARGET_DATE, '%Y-%m-%d') - timedelta(weeks=weeks + 4)).strftime('%Y%m%d')
-            bs_start_date = (datetime.strptime(Config.TARGET_DATE, '%Y-%m-%d') - timedelta(weeks=weeks + 4)).strftime('%Y-%m-%d')
-            bs_end_date = Config.TARGET_DATE
+            
         else:
             start_date = (datetime.now() - timedelta(weeks=weeks + 4)).strftime('%Y%m%d')
-            bs_start_date = (datetime.now() - timedelta(weeks=weeks + 4)).strftime('%Y-%m-%d')
-            bs_end_date = datetime.now().strftime('%Y-%m-%d')
 
         # 第1级：东财周线接口（东财不可用时直接跳过）
         df = None
@@ -187,19 +159,7 @@ class StockFilter:
             except Exception:
                 pass
 
-        # 第2级：东财失败或不可用，优先 BaoStock 周线
-        # 优化：当东财不可用时，跳过 BaoStock，直接从日线重采样
-        if df is None or df.empty:
-            if is_eastmoney_available() and is_baostock_available():
-                try:
-                    df = fetch_weekly_via_baostock(code, bs_start_date, bs_end_date)
-                    if df is not None and not df.empty:
-                        logger.debug(f"股票 {code} 周线使用 BaoStock")
-                except Exception as e:
-                    logger.warning(f"股票 {code} BaoStock 周线失败: {e}")
-                    df = None
-
-        # 第3级：BaoStock 也失败或不可用，从日线数据重采样为周线
+        # 第2级：东财失败或不可用，从日线数据重采样为周线
         if df is None or df.empty:
             try:
                 daily_df = self.fetch_daily_data(code, days=weeks * 7 + 30)
@@ -283,13 +243,9 @@ class StockFilter:
         1. 流通股本 × 收盘价（最准确）
            新浪 stock_zh_a_daily 返回 outstanding_share（流通股本，单位：股）
            流通市值 = outstanding_share × close
-           验证：贵州茅台 outstanding_share=12.5亿股, close=1253 → 15662亿（实际约1.5-1.6万亿）
 
         2. 成交额 / 换手率（备用）
-           需注意换手率单位差异：
-           - BaoStock turn: 百分比形式（0.4673 = 0.4673%），需除以100
-           - 新浪 turnover: 小数形式（0.004673 = 0.4673%），不需除以100
-           通过判断 turnover > 0.1 区分（正常股票单日换手率不会超过10%即0.1）
+           新浪 turnover: 小数形式（0.004673 = 0.4673%），不需除以100
 
         参数:
             code: 6位纯数字代码
@@ -320,24 +276,10 @@ class StockFilter:
                     # 新浪接口 amount 单位可能是"元"或"万元"，需要判断
                     # 正常成交额不会小于 1000（单位：元），如果小于 1000 可能是"万元"
                     if amount < 1000 and close > 0:
-                        amount = amount * 10000  # 转为元
-                    
-                    # 判断换手率单位
-                    if turn > 0.1:
-                        circ_mv_yuan = amount / (turn / 100)
-                    else:
-                        circ_mv_yuan = amount / turn
-                    return circ_mv_yuan / 1e8
+                        amount = amount * 10000
 
-            # 方式3：新浪接口可能有不同的列名，尝试其他可能的列
-            if 'volume' in df.columns and close > 0:
-                volume = float(latest.get('volume', 0))
-                if volume > 0:
-                    # 新浪 volume 单位通常是"股"
-                    # 简单估算：假设平均价 = 收盘价，则流通市值 ≈ 成交额/换手率
-                    # 但如果没有换手率，我们无法准确计算
-                    # 这里只做一个粗略的估算，不用于筛选
-                    pass
+                    circ_mv_yuan = amount / turn
+                    return circ_mv_yuan / 1e8
 
             logger.debug(f"股票 {code} 无法反推流通市值，列名: {df.columns.tolist()}")
             return 0
@@ -627,7 +569,7 @@ class StockFilter:
         else:
             result['details']['plate_rank'] = 1  # 降级模式占位
 
-        # 获取日线数据（BaoStock 单连接，串行获取更稳定）
+        # 获取日线数据
         daily_df = self.fetch_daily_data(result['code'])
 
         if self.check_new_stock(daily_df):
@@ -640,7 +582,7 @@ class StockFilter:
             return result
         result['details']['daily_trend'] = daily_trend_msg
 
-        # 获取周线数据（BaoStock 已通过 _bs_call_lock 串行化，多线程安全）
+        # 获取周线数据
         weekly_df = self.fetch_weekly_data(result['code'])
         weekly_trend_ok, weekly_trend_msg = self.check_weekly_trend(weekly_df)
         if not weekly_trend_ok:

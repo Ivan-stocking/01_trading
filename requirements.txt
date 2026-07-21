@@ -1,6 +1,5 @@
 akshare>=1.11.0
 tushare>=1.2.89
-baostock>=0.8.8
 pandas>=2.0.0
 numpy>=1.24.0
 python-dateutil>=2.8.0
