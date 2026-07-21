@@ -130,6 +130,28 @@ def reset_eastmoney_check():
     _eastmoney_push2_available = None
 
 
+def is_baostock_enabled():
+    """检查 BaoStock 是否可用（已登录或网络可用）
+    
+    返回 False 的情况：
+    1. BaoStock 模块未安装
+    2. 之前登录失败（网络问题）
+    返回 True 的情况：
+    1. 已成功登录
+    2. 模块已安装但尚未检测网络状态（首次调用）
+    """
+    global _bs_available
+    # 如果已经检测过不可用，直接返回 False
+    if _bs_available == False:
+        return False
+    # 如果已登录，返回 True
+    if _bs_logged_in:
+        return True
+    # 模块未安装的情况在 ensure_baostock_login 中处理
+    # 这里如果 _bs_available 是 None（未检测），返回 True 允许尝试登录
+    return True
+
+
 # ============================================================================
 # 按数据源分组节流器
 # ============================================================================
@@ -188,6 +210,7 @@ def throttle(source='default'):
 
 _bs_login_lock = threading.Lock()
 _bs_logged_in = False
+_bs_available = None  # None=未检测, True/False=检测结果
 # BaoStock 全局调用锁：单 socket 连接不支持并发，必须串行所有调用
 # 否则会出现 utf-8 decode error / decompress error（数据流错乱）
 _bs_call_lock = threading.Lock()
@@ -195,22 +218,32 @@ _bs_call_lock = threading.Lock()
 
 def ensure_baostock_login():
     """确保 BaoStock 已登录（单例模式）"""
-    global _bs_logged_in
+    global _bs_logged_in, _bs_available
     with _bs_login_lock:
         if _bs_logged_in:
             return True
+        # 如果之前检测过不可用，直接返回 False
+        if _bs_available == False:
+            return False
         try:
             import baostock as bs
             throttle('baostock')
             lg = bs.login()
             if lg.error_code == '0':
                 _bs_logged_in = True
+                _bs_available = True
                 logger.info("BaoStock 登录成功")
                 return True
             else:
                 logger.error(f"BaoStock 登录失败: {lg.error_msg}")
+                _bs_available = False
                 return False
+        except ImportError:
+            _bs_available = False
+            logger.warning("BaoStock 模块未安装，将跳过 BaoStock 数据源")
+            return False
         except Exception as e:
+            _bs_available = False
             logger.error(f"BaoStock 登录异常: {e}")
             return False
 
@@ -258,6 +291,10 @@ def fetch_daily_via_baostock(code, start_date, end_date):
 
     线程安全：BaoStock 单 socket 连接不支持并发，通过 _bs_call_lock 串行化所有调用。
     """
+    # 先检查全局标志，避免重复登录失败
+    global _bs_available
+    if _bs_available == False:
+        return None
     if not ensure_baostock_login():
         return None
 
@@ -304,6 +341,10 @@ def fetch_weekly_via_baostock(code, start_date, end_date):
 
     线程安全：通过 _bs_call_lock 串行化所有 BaoStock 调用。
     """
+    # 先检查全局标志，避免重复登录失败
+    global _bs_available
+    if _bs_available == False:
+        return None
     if not ensure_baostock_login():
         return None
 

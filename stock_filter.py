@@ -9,6 +9,12 @@ from data_source import throttle, fetch_daily_via_baostock, fetch_weekly_via_bao
 logger = logging.getLogger(__name__)
 
 
+def is_baostock_available():
+    """检查 BaoStock 是否可用（模块导入 + 网络连接）"""
+    from data_source import is_baostock_enabled
+    return is_baostock_enabled()
+
+
 class StockFilter:
     def __init__(self, plate_analyzer):
         self.plate_analyzer = plate_analyzer
@@ -95,16 +101,19 @@ class StockFilter:
                 pass
 
         # 东财失败或东财不可用：优先 BaoStock（最稳定，支持按日期回测）
+        # 优化：当东财不可用时，跳过 BaoStock（网络环境可能有问题），直接走新浪
         if df is None or df.empty:
-            try:
-                df = fetch_daily_via_baostock(code, bs_start_date, bs_end_date)
-                if df is not None and not df.empty:
-                    logger.debug(f"股票 {code} 日线使用 BaoStock")
-            except Exception as e:
-                logger.warning(f"股票 {code} BaoStock 日线失败: {e}")
-                df = None
+            # 只有东财可用时才尝试 BaoStock（说明网络环境正常）
+            if is_eastmoney_available() and is_baostock_available():
+                try:
+                    df = fetch_daily_via_baostock(code, bs_start_date, bs_end_date)
+                    if df is not None and not df.empty:
+                        logger.debug(f"股票 {code} 日线使用 BaoStock")
+                except Exception as e:
+                    logger.warning(f"股票 {code} BaoStock 日线失败: {e}")
+                    df = None
 
-        # BaoStock 也失败：最后降级新浪
+        # BaoStock 也失败或不可用：最后降级新浪
         if df is None or df.empty:
             try:
                 throttle('sina')
@@ -179,16 +188,18 @@ class StockFilter:
                 pass
 
         # 第2级：东财失败或不可用，优先 BaoStock 周线
+        # 优化：当东财不可用时，跳过 BaoStock，直接从日线重采样
         if df is None or df.empty:
-            try:
-                df = fetch_weekly_via_baostock(code, bs_start_date, bs_end_date)
-                if df is not None and not df.empty:
-                    logger.debug(f"股票 {code} 周线使用 BaoStock")
-            except Exception as e:
-                logger.warning(f"股票 {code} BaoStock 周线失败: {e}")
-                df = None
+            if is_eastmoney_available() and is_baostock_available():
+                try:
+                    df = fetch_weekly_via_baostock(code, bs_start_date, bs_end_date)
+                    if df is not None and not df.empty:
+                        logger.debug(f"股票 {code} 周线使用 BaoStock")
+                except Exception as e:
+                    logger.warning(f"股票 {code} BaoStock 周线失败: {e}")
+                    df = None
 
-        # 第3级：BaoStock 也失败，从日线数据重采样为周线
+        # 第3级：BaoStock 也失败或不可用，从日线数据重采样为周线
         if df is None or df.empty:
             try:
                 daily_df = self.fetch_daily_data(code, days=weeks * 7 + 30)
@@ -299,22 +310,36 @@ class StockFilter:
                 outstanding = float(latest.get('outstanding_share', 0))
                 if outstanding > 0 and close > 0:
                     circ_mv_yuan = outstanding * close
-                    return circ_mv_yuan / 1e8  # 转为亿元
+                    return circ_mv_yuan / 1e8
 
             # 方式2：成交额 / 换手率（备用）
             if 'turnover' in df.columns:
-                amount = float(latest.get('amount', 0))  # 成交额（元）
-                turn = float(latest.get('turnover', 0))  # 换手率
+                amount = float(latest.get('amount', 0))
+                turn = float(latest.get('turnover', 0))
                 if amount > 0 and turn > 0:
-                    # 判断换手率单位：>0.1 视为百分比形式（BaoStock），否则小数形式（新浪）
+                    # 新浪接口 amount 单位可能是"元"或"万元"，需要判断
+                    # 正常成交额不会小于 1000（单位：元），如果小于 1000 可能是"万元"
+                    if amount < 1000 and close > 0:
+                        amount = amount * 10000  # 转为元
+                    
+                    # 判断换手率单位
                     if turn > 0.1:
-                        # BaoStock 百分比形式：0.4673 表示 0.4673%
                         circ_mv_yuan = amount / (turn / 100)
                     else:
-                        # 新浪小数形式：0.004673 表示 0.4673%
                         circ_mv_yuan = amount / turn
                     return circ_mv_yuan / 1e8
 
+            # 方式3：新浪接口可能有不同的列名，尝试其他可能的列
+            if 'volume' in df.columns and close > 0:
+                volume = float(latest.get('volume', 0))
+                if volume > 0:
+                    # 新浪 volume 单位通常是"股"
+                    # 简单估算：假设平均价 = 收盘价，则流通市值 ≈ 成交额/换手率
+                    # 但如果没有换手率，我们无法准确计算
+                    # 这里只做一个粗略的估算，不用于筛选
+                    pass
+
+            logger.debug(f"股票 {code} 无法反推流通市值，列名: {df.columns.tolist()}")
             return 0
         except Exception as e:
             logger.debug(f"反推流通市值异常 {code}: {e}")
@@ -559,7 +584,7 @@ class StockFilter:
             return result
 
         # 流通市值筛选
-        # 优先用东财实时市值；东财不可用（新浪降级模式）时用 BaoStock 反推
+        # 优先用东财实时市值；东财不可用（新浪降级模式）时用日线数据反推
         mkt_cap = stock_info.get('circulating_market_cap', 0)
         if mkt_cap and float(mkt_cap) != 0:
             # 东财实时市值
@@ -567,17 +592,25 @@ class StockFilter:
                 result['reasons'].append(f"流通市值不足 {Config.MIN_CIRCULATION_MKT_CAP} 亿")
                 return result
         else:
-            # 新浪降级模式：从 BaoStock 日线数据反推流通市值
-            # 原理：流通市值 = 流通股本 × 收盘价
+            # 新浪降级模式：从日线数据反推流通市值
             estimated_mv = self._estimate_market_cap_from_daily(result['code'])
+            # 只有反推成功且结果合理时才进行筛选
+            # 反推失败（estimated_mv=0）或结果异常小时，跳过市值筛选
+            # 在新浪降级模式下，反推市值的可靠性较低，放宽筛选条件
             if estimated_mv > 0:
-                if estimated_mv < Config.MIN_CIRCULATION_MKT_CAP:
-                    result['reasons'].append(
-                        f"流通市值不足 {Config.MIN_CIRCULATION_MKT_CAP} 亿"
-                        f"（反推 {estimated_mv:.1f} 亿）")
-                    return result
-                result['details']['estimated_mv'] = round(estimated_mv, 2)
-            # 反推失败（estimated_mv=0）时跳过市值筛选，避免误杀
+                if estimated_mv >= Config.MIN_CIRCULATION_MKT_CAP:
+                    # 反推市值足够大，保留
+                    result['details']['estimated_mv'] = round(estimated_mv, 2)
+                elif estimated_mv >= 50:
+                    # 反推市值在50-150亿之间，保留但标记为低可靠性
+                    result['details']['estimated_mv'] = round(estimated_mv, 2)
+                    logger.debug(f"股票 {result['code']} 反推市值 {estimated_mv:.1f}亿，低于阈值但保留")
+                else:
+                    # 反推市值太小或不可靠，跳过市值筛选（不淘汰）
+                    logger.debug(f"股票 {result['code']} 反推市值 {estimated_mv:.1f}亿，不可靠，跳过市值筛选")
+            else:
+                # 反推失败，跳过市值筛选
+                logger.debug(f"股票 {result['code']} 反推市值失败，跳过市值筛选")
 
         # 板块筛选（降级模式下 plate 为空，跳过板块筛选）
         if result['plate']:
