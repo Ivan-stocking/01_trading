@@ -28,7 +28,7 @@ class Config:
     RESISTANCE_LIMIT = 15
     PROFIT_RATE_LIMIT = 70
 
-    MAX_PLATE_RANK = 20
+    MAX_PLATE_RANK = 50                  # 行业板块排名上限（取前50个申万二级行业）
 
     LONG_SHADOW_WINDOW = 3
     LONG_SHADOW_RATIO = 2.0
