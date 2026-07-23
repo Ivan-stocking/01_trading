@@ -208,13 +208,13 @@ def _write_analysis_records(records):
     filename = 'stock_analysis_records.csv'
     scan_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # CSV 列定义
+    # CSV 列定义（失败原因前置）
     fieldnames = [
         '分析时间', '代码', '名称', '所属板块', '当前涨跌幅(%)', '流通市值(亿)',
-        '日线趋势', '周线趋势', '乖离率(%)', '突破前高', '涨停基因', '最近涨停日',
-        '相对强度', '超额收益(%)', '板块排名', '板块涨幅≥5%家数', '板块涨停家数',
-        '综合评分', 'filter_stock是否通过', '分钟条件是否通过', '分钟失败原因',
         '失败原因',
+        '乖离率(%)', '突破前高', '最近涨停日',
+        '相对强度', '板块排名', '板块涨幅≥5%家数', '板块涨停家数',
+        '综合评分', 'filter_stock是否通过', '分钟条件是否通过', '分钟失败原因',
     ]
 
     try:
@@ -254,14 +254,11 @@ def _write_analysis_records(records):
                     '所属板块': stock_result.get('plate', ''),
                     '当前涨跌幅(%)': round(stock_result.get('change_percent', 0), 2),
                     '流通市值(亿)': round(mkt_cap_yi, 2),
-                    '日线趋势': details.get('daily_trend', ''),
-                    '周线趋势': details.get('weekly_trend', ''),
+                    '失败原因': '; '.join(reasons) if reasons else ('通过' if stock_result.get('passed') else ''),
                     '乖离率(%)': round(details.get('bias', 0), 2) if details.get('bias') is not None else '',
                     '突破前高': '是' if details.get('breakout') else ('否' if 'breakout' in details else ''),
-                    '涨停基因': details.get('zt_gene', ''),
                     '最近涨停日': last_zt,
                     '相对强度': details.get('relative_strength', ''),
-                    '超额收益(%)': round(details.get('excess_return', 0), 2) if details.get('excess_return') is not None else '',
                     '板块排名': details.get('plate_rank', ''),
                     '板块涨幅≥5%家数': details.get('plate_above_5pct', ''),
                     '板块涨停家数': details.get('plate_limit_up', ''),
@@ -269,7 +266,6 @@ def _write_analysis_records(records):
                     'filter_stock是否通过': '是' if stock_result.get('passed') else '否',
                     '分钟条件是否通过': minute_passed,
                     '分钟失败原因': minute_fail,
-                    '失败原因': '; '.join(reasons) if reasons else ('通过' if stock_result.get('passed') else ''),
                 })
 
         logger.info(f"分析记录已写入 {filename}（共 {len(records)} 条）")
@@ -339,7 +335,7 @@ def run_filter():
             passed_stocks = _filter_stocks_concurrent(
                 scan_list, plate_analyzer, stock_filter, minute_processor)
         else:
-            # 正常模式：遍历申万二级行业前N的成分股
+            # 正常模式：遍历申万二级行业前N的成分股（仅沪深主板 60/00 开头）
             qualified_plates = {p for p, stats in plate_analyzer.plate_stats.items()
                                if stats['rank'] <= Config.MAX_PLATE_RANK}
             qualified_codes = [code for code, plate in plate_analyzer.stock_plate_map.items()
@@ -350,6 +346,11 @@ def run_filter():
             scan_df = plate_analyzer.all_a_stocks[
                 plate_analyzer.all_a_stocks['code'].isin(qualified_codes)
             ].copy()
+            # 过滤非沪深主板（60/00开头），排除创业板/科创板/北交所
+            scan_df['code'] = scan_df['code'].astype(str).str.zfill(6)
+            scan_df = scan_df[scan_df['code'].apply(
+                lambda c: c.startswith(tuple(Config.STOCK_PREFIX_MAIN)))].reset_index(drop=True)
+            logger.info(f"过滤非沪深主板后，实际筛选 {len(scan_df)} 只")
 
             passed_stocks = _filter_stocks_concurrent(
                 scan_df, plate_analyzer, stock_filter, minute_processor,
