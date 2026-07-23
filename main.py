@@ -208,13 +208,12 @@ def _write_analysis_records(records):
     filename = 'stock_analysis_records.csv'
     scan_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # CSV 列定义（失败原因前置）
+    # CSV 列定义（失败原因前置，仅保留筛选阶段即可确定的基础字段）
     fieldnames = [
         '分析时间', '代码', '名称', '所属板块', '当前涨跌幅(%)', '流通市值(亿)',
         '失败原因',
-        '乖离率(%)', '突破前高', '最近涨停日',
-        '相对强度', '板块排名', '板块涨幅≥5%家数', '板块涨停家数',
-        '综合评分', 'filter_stock是否通过', '分钟条件是否通过', '分钟失败原因',
+        '最近涨停日', '综合评分', 'filter_stock是否通过',
+        '分钟条件是否通过', '分钟失败原因',
     ]
 
     try:
@@ -235,7 +234,7 @@ def _write_analysis_records(records):
                 except (ValueError, TypeError):
                     mkt_cap_yi = 0
 
-                # 最近涨停日
+                # 最近涨停日（仅通过涨停基因检查的股票才有）
                 zt_dates = details.get('zt_dates', []) or []
                 last_zt = zt_dates[0]['date'] if zt_dates else ''
 
@@ -255,13 +254,7 @@ def _write_analysis_records(records):
                     '当前涨跌幅(%)': round(stock_result.get('change_percent', 0), 2),
                     '流通市值(亿)': round(mkt_cap_yi, 2),
                     '失败原因': '; '.join(reasons) if reasons else ('通过' if stock_result.get('passed') else ''),
-                    '乖离率(%)': round(details.get('bias', 0), 2) if details.get('bias') is not None else '',
-                    '突破前高': '是' if details.get('breakout') else ('否' if 'breakout' in details else ''),
                     '最近涨停日': last_zt,
-                    '相对强度': details.get('relative_strength', ''),
-                    '板块排名': details.get('plate_rank', ''),
-                    '板块涨幅≥5%家数': details.get('plate_above_5pct', ''),
-                    '板块涨停家数': details.get('plate_limit_up', ''),
                     '综合评分': round(details.get('ranking_score', 0), 1) if details.get('ranking_score') is not None else '',
                     'filter_stock是否通过': '是' if stock_result.get('passed') else '否',
                     '分钟条件是否通过': minute_passed,
