@@ -5,7 +5,7 @@ class Config:
     ANALYSIS_TIME = "10:00"
     PATCH_TIME_START = "09:45"
 
-    MIN_CIRCULATION_MKT_CAP = 150
+    MIN_CIRCULATION_MKT_CAP = 80
 
     EARLY_VOLUME_RATIO_THRESHOLD = 0.35
 
@@ -28,7 +28,7 @@ class Config:
     RESISTANCE_LIMIT = 15
     PROFIT_RATE_LIMIT = 70
 
-    MAX_PLATE_RANK = 50                  # 行业板块排名上限（取前50个申万二级行业）
+    MAX_PLATE_RANK = 25                  # 行业板块排名上限（取前25个申万二级行业）
 
     LONG_SHADOW_WINDOW = 3
     LONG_SHADOW_RATIO = 2.0
