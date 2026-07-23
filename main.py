@@ -112,6 +112,8 @@ def _filter_one_stock(code, stock_row, plate_name, stock_filter, minute_processo
     """单只股票筛选（线程内执行）
 
     返回 (code, stock_result, minute_result)。
+    始终返回 stock_result（即使失败也含 reasons/details），便于记录分析。
+    stock_result 为 None 仅在异常且无法构建结果时。
     线程安全说明：stock_filter 的缓存字典是 Python dict，
     多线程写入可能有竞争，但 GIL 下单次赋值操作原子性足够，
     且最坏情况只是重复请求一次数据，不影响正确性。
@@ -127,6 +129,7 @@ def _filter_one_stock(code, stock_row, plate_name, stock_filter, minute_processo
         }
 
         stock_result = stock_filter.filter_stock(stock_info)
+        minute_result = None
 
         if stock_result['passed']:
             daily_df = stock_filter.get_cached_daily_data(code)
@@ -138,7 +141,7 @@ def _filter_one_stock(code, stock_row, plate_name, stock_filter, minute_processo
                 stock_result['minute_details'] = minute_result['details']
                 return code, stock_result, minute_result
 
-        return code, None, None
+        return code, stock_result, minute_result
     except Exception as e:
         logger.error(f"处理股票 {code} 异常: {e}")
         return code, None, None
@@ -155,9 +158,11 @@ def _filter_stocks_concurrent(scan_list, plate_analyzer, stock_filter, minute_pr
         minute_processor: 分时处理器
         plate_name_map: 可选，code→plate_name 映射（正常模式用）
 
-    返回: 通过筛选的股票列表
+    返回: 通过筛选的股票列表。同时将所有分析过的股票（含指标与失败原因）
+          写入 stock_analysis_records.csv。
     """
     passed_stocks = []
+    all_records = []  # 所有股票的筛选记录（含失败原因）
     total = len(scan_list)
     logger.info(f"开始并发筛选 {total} 只股票（并发数 {Config.STOCK_FILTER_MAX_WORKERS}）...")
 
@@ -176,12 +181,100 @@ def _filter_stocks_concurrent(scan_list, plate_analyzer, stock_filter, minute_pr
         for future in as_completed(futures):
             code, stock_result, minute_result = future.result()
             completed += 1
-            if stock_result is not None:
+            if stock_result is not None and stock_result.get('passed') \
+                    and minute_result is not None and minute_result.get('passed'):
                 passed_stocks.append(stock_result)
+            # 收集所有记录（含失败）
+            if stock_result is not None:
+                all_records.append((stock_result, minute_result))
             if completed % 50 == 0:
                 logger.info(f"已处理 {completed}/{total} 只，通过 {len(passed_stocks)} 只")
 
+    # 写入分析记录文件
+    _write_analysis_records(all_records)
+
     return passed_stocks
+
+
+def _write_analysis_records(records):
+    """将所有分析过的股票记录写入 CSV 文件
+
+    记录每只股票的代码、名称、板块、涨幅、市值、各项指标、是否通过、失败原因。
+    文件名: stock_analysis_records.csv（追加模式，含日期时间列）
+    """
+    import csv
+    from datetime import datetime
+
+    filename = 'stock_analysis_records.csv'
+    scan_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    # CSV 列定义
+    fieldnames = [
+        '分析时间', '代码', '名称', '所属板块', '当前涨跌幅(%)', '流通市值(亿)',
+        '日线趋势', '周线趋势', '乖离率(%)', '突破前高', '涨停基因', '最近涨停日',
+        '相对强度', '超额收益(%)', '板块排名', '板块涨幅≥5%家数', '板块涨停家数',
+        '综合评分', 'filter_stock是否通过', '分钟条件是否通过', '分钟失败原因',
+        '失败原因',
+    ]
+
+    try:
+        with open(filename, 'a', newline='', encoding='utf-8-sig') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            # 文件为空时写表头
+            if f.tell() == 0:
+                writer.writeheader()
+
+            for stock_result, minute_result in records:
+                details = stock_result.get('details', {}) or {}
+                reasons = stock_result.get('reasons', []) or []
+
+                # 格式化市值为亿元
+                mkt_cap = stock_result.get('circulating_market_cap', 0)
+                try:
+                    mkt_cap_yi = float(mkt_cap) / 1e8 if mkt_cap else 0
+                except (ValueError, TypeError):
+                    mkt_cap_yi = 0
+
+                # 最近涨停日
+                zt_dates = details.get('zt_dates', []) or []
+                last_zt = zt_dates[0]['date'] if zt_dates else ''
+
+                # 分钟条件失败原因
+                minute_passed = ''
+                minute_fail = ''
+                if minute_result is not None:
+                    minute_passed = '是' if minute_result.get('passed') else '否'
+                    if not minute_result.get('passed'):
+                        minute_fail = '; '.join(minute_result.get('reasons', []) or [])
+
+                writer.writerow({
+                    '分析时间': scan_time,
+                    '代码': stock_result.get('code', ''),
+                    '名称': stock_result.get('name', ''),
+                    '所属板块': stock_result.get('plate', ''),
+                    '当前涨跌幅(%)': round(stock_result.get('change_percent', 0), 2),
+                    '流通市值(亿)': round(mkt_cap_yi, 2),
+                    '日线趋势': details.get('daily_trend', ''),
+                    '周线趋势': details.get('weekly_trend', ''),
+                    '乖离率(%)': round(details.get('bias', 0), 2) if details.get('bias') is not None else '',
+                    '突破前高': '是' if details.get('breakout') else ('否' if 'breakout' in details else ''),
+                    '涨停基因': details.get('zt_gene', ''),
+                    '最近涨停日': last_zt,
+                    '相对强度': details.get('relative_strength', ''),
+                    '超额收益(%)': round(details.get('excess_return', 0), 2) if details.get('excess_return') is not None else '',
+                    '板块排名': details.get('plate_rank', ''),
+                    '板块涨幅≥5%家数': details.get('plate_above_5pct', ''),
+                    '板块涨停家数': details.get('plate_limit_up', ''),
+                    '综合评分': round(details.get('ranking_score', 0), 1) if details.get('ranking_score') is not None else '',
+                    'filter_stock是否通过': '是' if stock_result.get('passed') else '否',
+                    '分钟条件是否通过': minute_passed,
+                    '分钟失败原因': minute_fail,
+                    '失败原因': '; '.join(reasons) if reasons else ('通过' if stock_result.get('passed') else ''),
+                })
+
+        logger.info(f"分析记录已写入 {filename}（共 {len(records)} 条）")
+    except Exception as e:
+        logger.error(f"写入分析记录文件失败: {e}")
 
 
 def run_filter():
