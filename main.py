@@ -246,17 +246,18 @@ def run_filter():
             passed_stocks = _filter_stocks_concurrent(
                 scan_list, plate_analyzer, stock_filter, minute_processor)
         else:
-            # 正常模式：遍历合格板块的成分股
+            # 正常模式：遍历申万二级行业前N的成分股
             qualified_plates = {p for p, stats in plate_analyzer.plate_stats.items()
                                if stats['rank'] <= Config.MAX_PLATE_RANK}
-            logger.info(f"合格板块 {len(qualified_plates)} 个，成分股 {len(plate_analyzer.stock_plate_map)} 只")
-
-            # 从 stock_plate_map 中筛选属于合格板块的成分股
             qualified_codes = [code for code, plate in plate_analyzer.stock_plate_map.items()
                               if plate in qualified_plates]
+
+            logger.info(f"行业板块 {len(qualified_plates)} 个，成分股 {len(qualified_codes)} 只")
+
             scan_df = plate_analyzer.all_a_stocks[
                 plate_analyzer.all_a_stocks['code'].isin(qualified_codes)
             ].copy()
+
             passed_stocks = _filter_stocks_concurrent(
                 scan_df, plate_analyzer, stock_filter, minute_processor,
                 plate_name_map=plate_analyzer.stock_plate_map
@@ -267,37 +268,32 @@ def run_filter():
         # 按综合评分降序排序
         passed_stocks.sort(key=lambda x: x['details'].get('ranking_score', 0), reverse=True)
 
-        # 双维度输出：板块维度 + 概念维度
-        plate_stocks = _select_by_dimension(passed_stocks, plate_analyzer, dimension='plate')
-        concept_stocks = _select_by_dimension(passed_stocks, plate_analyzer, dimension='concept')
+        # 行业板块维度：取前 TOP_STOCK_MAX 只
+        plate_stocks = _select_plate_stocks(passed_stocks, plate_analyzer)
 
-        print_results_dual(plate_stocks, concept_stocks, all_a_index_change, plate_analyzer)
+        print_results(plate_stocks, all_a_index_change, plate_analyzer)
 
-        return {'plate': plate_stocks, 'concept': concept_stocks}
+        return plate_stocks
 
     except Exception as e:
         logger.error(f"执行筛选程序异常: {e}", exc_info=True)
         return []
 
 
-def _select_by_dimension(passed_stocks, plate_analyzer, dimension):
-    """按维度选择前 TOP_STOCK_MAX 只股票
+def _select_plate_stocks(passed_stocks, plate_analyzer):
+    """选择前 TOP_STOCK_MAX 只行业板块维度的股票
 
     参数:
         passed_stocks: 通过筛选的股票列表（已按 ranking_score 降序）
         plate_analyzer: 板块分析器
-        dimension: 'plate'（行业板块维度）或 'concept'（概念维度）
 
-    返回: 该维度下的前 TOP_STOCK_MAX 只股票列表
-
-    每只股票 dict 额外填充展示字段（供 _print_stock_table 使用）：
-        - dimension_name: 该维度下展示的板块/概念名称（字符串）
-        - dimension_change: 该维度下展示的板块/概念当前涨跌幅（float）
-        - bias: 乖离率（float，从 details['bias'] 复制）
-        - last_zt_date: 最近涨停日期（字符串，从 details['zt_dates'][0]['date'] 复制，无则 '-'）
+    返回: 前 TOP_STOCK_MAX 只股票列表，每只额外填充展示字段：
+        - dimension_name: 所属板块名称
+        - dimension_change: 板块当前涨跌幅
+        - bias: 乖离率
+        - last_zt_date: 最近涨停日期
     """
     def _fill_display_fields(stock, dim_name, dim_change):
-        """填充展示字段到 stock dict 的副本"""
         s = dict(stock)
         s['dimension_name'] = dim_name or '-'
         s['dimension_change'] = dim_change
@@ -307,92 +303,44 @@ def _select_by_dimension(passed_stocks, plate_analyzer, dimension):
         s['last_zt_date'] = zt_dates[0]['date'] if zt_dates else '-'
         return s
 
-    if dimension == 'plate':
-        # 板块维度：优先选择有板块归属的股票
-        selected = []
-        for s in passed_stocks:
-            plate_name = s.get('plate', '')
-            if plate_name:
-                plate_change = plate_analyzer.get_plate_change_percent(plate_name)
-                selected.append(_fill_display_fields(s, plate_name, plate_change))
-        return selected[:TOP_STOCK_MAX]
-
-    elif dimension == 'concept':
-        # 概念维度：通过股票名称与热点概念关键词匹配
-        hot_concepts = plate_analyzer.concept_hot_list
-        if not hot_concepts:
-            # 无热点概念数据，返回全部通过的前N只，无匹配概念信息
-            return [_fill_display_fields(s, '-', 0.0) for s in passed_stocks[:TOP_STOCK_MAX]]
-
-        # 提取热点概念关键词（取每个概念名的前2-4字作为关键词）
-        concept_keywords = set()
-        for concept in hot_concepts:
-            name = str(concept)
-            if len(name) >= 2:
-                concept_keywords.add(name[:2])
-                if len(name) >= 3:
-                    concept_keywords.add(name[:3])
-                if len(name) >= 4:
-                    concept_keywords.add(name[:4])
-
-        # 匹配股票名称包含热点概念关键词
-        matched = []
-        unmatched = []
-        for s in passed_stocks:
-            name = str(s.get('name', ''))
-            # 找出该股票匹配到的所有热点概念（带涨跌幅）
-            matched_list = []
-            for c in hot_concepts:
-                c_name = str(c)
-                if (c_name[:2] in name) or (len(c_name) >= 3 and c_name[:3] in name) \
-                   or (len(c_name) >= 4 and c_name[:4] in name):
-                    matched_list.append({
-                        'name': c_name,
-                        'change': plate_analyzer.get_concept_change_percent(c_name)
-                    })
-            if matched_list:
-                # 取涨幅最高的匹配概念作为展示
-                best = max(matched_list, key=lambda x: x['change'])
-                s_copy = _fill_display_fields(s, best['name'], best['change'])
-                s_copy['matched_concepts'] = matched_list
-                matched.append(s_copy)
-            else:
-                unmatched.append(s)
-
-        # 概念维度：优先返回名称匹配热点概念的股票，不足则用其他填充
-        result = matched[:TOP_STOCK_MAX]
-        if len(result) < TOP_STOCK_MAX:
-            for s in unmatched[:TOP_STOCK_MAX - len(result)]:
-                result.append(_fill_display_fields(s, '-', 0.0))
-        return result
-
-    return [_fill_display_fields(s, '-', 0.0) for s in passed_stocks[:TOP_STOCK_MAX]]
+    selected = []
+    for s in passed_stocks:
+        plate_name = s.get('plate', '')
+        if plate_name:
+            plate_change = plate_analyzer.get_plate_change_percent(plate_name)
+            selected.append(_fill_display_fields(s, plate_name, plate_change))
+    return selected[:TOP_STOCK_MAX]
 
 
-def print_results_dual(plate_stocks, concept_stocks, all_a_index_change, plate_analyzer):
-    """以表格形式打印双维度筛选结果"""
+def print_results(plate_stocks, all_a_index_change, plate_analyzer):
+    """以表格形式打印行业板块维度筛选结果"""
     print("\n" + "=" * 130)
-    print("A股开盘30分钟强势股筛选结果（双维度）")
+    print("A股开盘30分钟强势股筛选结果（行业板块维度）")
     print("=" * 130)
     print(f"全A指数涨幅: {all_a_index_change:.2f}%    "
-          f"概念热点均值: {plate_analyzer.concept_avg_change:.2f}%    "
-          f"市场概念: {'活跃' if plate_analyzer.is_concept_active() else '冷清'}    "
-          f"板块/概念排名上限: {Config.MAX_PLATE_RANK}")
+          f"行业板块排名上限: {Config.MAX_PLATE_RANK}")
     print("-" * 130)
 
-    # 板块维度
-    print(f"\n【行业板块维度】筛选通过: {len(plate_stocks)} 只")
+    # 列出选中的前N行业板块
+    top_plates = []
+    if plate_analyzer.plate_rankings is not None:
+        top_plates = plate_analyzer.plate_rankings[
+            plate_analyzer.plate_rankings['rank'] <= Config.MAX_PLATE_RANK
+        ]['name'].tolist()
+    print(f"\n【前{Config.MAX_PLATE_RANK}行业板块】（申万二级行业，按涨幅降序）")
+    if top_plates:
+        for i, name in enumerate(top_plates, 1):
+            change = plate_analyzer.get_plate_change_percent(name)
+            print(f"  {i}. {name}（{change:+.2f}%）")
+    else:
+        print("  暂无板块数据")
+    print("-" * 130)
+
+    # 行业板块维度筛选结果
+    print(f"\n【前{Config.MAX_PLATE_RANK}行业板块】筛选通过: {len(plate_stocks)} 只")
     print("-" * 130)
     if plate_stocks:
         _print_stock_table(plate_stocks, dimension_label='板块')
-    else:
-        print("  暂无符合条件的股票")
-
-    # 概念维度
-    print(f"\n【概念板块维度】筛选通过: {len(concept_stocks)} 只")
-    print("-" * 130)
-    if concept_stocks:
-        _print_stock_table(concept_stocks, dimension_label='概念')
     else:
         print("  暂无符合条件的股票")
 

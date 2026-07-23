@@ -28,7 +28,7 @@ class Config:
     RESISTANCE_LIMIT = 15
     PROFIT_RATE_LIMIT = 70
 
-    MAX_PLATE_RANK = 20
+    MAX_PLATE_RANK = 50                  # 行业板块排名上限（取前50个申万二级行业）
 
     LONG_SHADOW_WINDOW = 3
     LONG_SHADOW_RATIO = 2.0
@@ -94,6 +94,8 @@ class Config:
     CONCEPT_MIN_CHANGE = 3.0               # 概念板块最低涨幅(%)
     CONCEPT_TOP_PERCENTILE = 0.10          # 概念板块前10%阈值（同行业板块）
     MAX_CONCEPT_RANK = 20                  # 概念板块排名上限
+    # 排除"事后结果型概念"（连板/打板/涨停等），不代表真实题材
+    CONCEPT_EXCLUDE_KEYWORDS = ['连板', '打板', '涨停', '首板', '炸板', '晋级', '跌停']
     # 概念板块获取数量限制（同花顺降级模式下从371个概念中只取前N个计算涨幅，减少请求量）
     # 优先取市值较大或常见概念，N=0 表示获取全部
     # 注：概念涨幅仅用于仓位建议调整，30个已足够反映市场热点情绪
@@ -139,6 +141,14 @@ COLUMN_MAP_CONCEPT = {
     '总市值': 'total_market_cap', '换手率': 'turnover',
     '上涨家数': 'rising_count', '下跌家数': 'falling_count',
     '领涨股票': 'leading_stock', '领涨股票-涨跌幅': 'leading_stock_change',
+}
+
+# 申万指数列名映射（index_realtime_sw 返回）
+COLUMN_MAP_SW = {
+    '指数代码': 'code', '指数名称': 'name',
+    '昨收盘': 'pre_close', '今开盘': 'open',
+    '最新价': 'current_price', '成交额': 'amount',
+    '成交量': 'volume', '最高价': 'high', '最低价': 'low',
 }
 
 
