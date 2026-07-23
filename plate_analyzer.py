@@ -4,7 +4,7 @@ import numpy as np
 import logging
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from config import Config, rename_columns, COLUMN_MAP_PLATE, COLUMN_MAP_SPOT, COLUMN_MAP_INDEX, COLUMN_MAP_CONCEPT, symbol_to_code, get_end_date
+from config import Config, rename_columns, COLUMN_MAP_PLATE, COLUMN_MAP_SPOT, COLUMN_MAP_INDEX, COLUMN_MAP_CONCEPT, COLUMN_MAP_SW, symbol_to_code, get_end_date
 from data_source import throttle, is_eastmoney_available
 
 logger = logging.getLogger(__name__)
@@ -30,45 +30,32 @@ class PlateAnalyzer:
         self.concept_avg_change = 0.0     # 热点概念平均涨幅
 
     def fetch_plate_data(self):
-        """获取行业板块数据
+        """获取申万二级行业数据
 
-        优先东财接口（stock_board_industry_name_em，含涨幅），失败降级同花顺接口
-        （stock_board_industry_name_ths，仅 name/code，需额外计算涨幅）。
+        使用 ak.index_realtime_sw(symbol='二级行业') 获取124个申万二级行业实时行情，
+        通过 (最新价 - 昨收盘) / 昨收盘 * 100 计算涨跌幅。
         """
         try:
-            logger.info("正在获取行业板块数据...")
+            logger.info("正在获取申万二级行业数据...")
 
-            # 优先东财接口（含涨幅数据）；东财不可用则直接走同花顺降级
-            if is_eastmoney_available():
-                try:
-                    throttle('eastmoney')
-                    self.plate_data = ak.stock_board_industry_name_em()
-                    if self.plate_data is not None and not self.plate_data.empty:
-                        self.plate_data = rename_columns(self.plate_data, COLUMN_MAP_PLATE)
-                        self.plate_data['change_percent'] = pd.to_numeric(
-                            self.plate_data['change_percent'], errors='coerce')
-                        logger.info(f"东财接口成功，获取 {len(self.plate_data)} 个板块")
-                        return True
-                except Exception as e:
-                    logger.warning(f"东财板块接口失败: {e}")
-            else:
-                logger.info("东财不可用，直接使用同花顺板块接口")
-
-            # 降级同花顺接口（仅 name/code，无涨幅，需后续计算）
-            logger.warning("降级使用同花顺板块接口（无实时涨幅，将通过板块指数计算）")
-            throttle('ths')
-            ths_df = ak.stock_board_industry_name_ths()
-            if ths_df is None or ths_df.empty:
-                logger.error("同花顺板块接口也失败")
+            throttle('default')
+            sw_df = ak.index_realtime_sw(symbol='二级行业')
+            if sw_df is None or sw_df.empty:
+                logger.error("申万二级行业数据获取失败")
                 return False
 
-            # 同花顺返回 name, code 两列，构造与东财兼容的结构
-            self.plate_data = ths_df.copy()
-            self.plate_data['change_percent'] = 0.0  # 占位，后续 fetch_plate_change 计算填充
-            logger.info(f"同花顺接口成功，获取 {len(self.plate_data)} 个板块（涨幅待计算）")
+            sw_df = rename_columns(sw_df, COLUMN_MAP_SW)
+            # 计算涨跌幅 = (最新价 - 昨收盘) / 昨收盘 * 100
+            sw_df['change_percent'] = (
+                pd.to_numeric(sw_df['current_price'], errors='coerce') -
+                pd.to_numeric(sw_df['pre_close'], errors='coerce')
+            ) / pd.to_numeric(sw_df['pre_close'], errors='coerce') * 100
+
+            self.plate_data = sw_df
+            logger.info(f"申万二级行业获取成功，共 {len(sw_df)} 个行业")
             return True
         except Exception as e:
-            logger.error(f"获取板块数据异常: {e}")
+            logger.error(f"获取申万二级行业数据异常: {e}")
             return False
 
     def fetch_all_a_stocks(self):
@@ -143,20 +130,6 @@ class PlateAnalyzer:
             plate_df = self.plate_data.copy()
             plate_df = plate_df.dropna(subset=['change_percent'])
 
-            # 如果涨幅全为0（同花顺降级模式），需通过板块指数计算涨幅
-            # 优化：东财不可用时跳过此计算（90个请求×2秒=180秒太慢，
-            # 且降级模式下板块维度本来就无成分股映射，不会出结果）
-            if (plate_df['change_percent'] == 0).all():
-                if is_eastmoney_available():
-                    # 东财可用但返回了空涨幅，尝试同花顺计算
-                    logger.info("板块涨幅为占位值，启动同花顺板块指数计算...")
-                    plate_df = self._calc_plate_change_via_ths(plate_df)
-                else:
-                    # 东财不可用，直接跳过板块涨幅计算（降级模式）
-                    logger.info("东财不可用，跳过同花顺板块涨幅计算（降级模式无板块维度结果）")
-                    self.plate_rankings = plate_df  # 涨幅全0，不参与板块维度筛选
-                    return True
-
             plate_df = plate_df.sort_values('change_percent', ascending=False)
             plate_df['rank'] = range(1, len(plate_df) + 1)
 
@@ -223,28 +196,12 @@ class PlateAnalyzer:
     def fetch_plate_constituents(self):
         """获取排名靠前板块的成分股，建立 code→plate 映射
 
-        stock_zh_a_spot_em 不含行业列，必须通过成分股接口逐板块获取。
-        使用线程池并发请求，由 Config.PLATE_CONS_MAX_WORKERS 控制并发度。
-
-        优化：
-        1. 设置 socket 超时（Config.REQUEST_SOCKET_TIMEOUT），避免东财不可用时
-           每个请求等待 2 分钟默认超时。
-        2. 预检模式（Config.PLATE_CONS_PREFLIGHT）：先单独请求第一个板块，
-           若失败（说明东财整体不可用）直接进入降级模式，跳过剩余板块请求，
-           节省大量等待时间。
-
-        如果东财成分股接口全部失败（映射为空），设置 degraded_mode=True，
-        后续 main.py 将降级为遍历涨幅前N只股票（跳过板块归属筛选）。
+        使用 ak.index_component_sw(symbol=index_code) 获取申万二级行业成分股。
+        申万接口稳定，无需东财预检。
         """
         if self.plate_rankings is None:
             logger.error("板块排名数据为空")
             return False
-
-        # 东财不可用时直接进入降级模式（板块成分股接口是东财独有的，无替代源）
-        if not is_eastmoney_available():
-            logger.info("东财不可用，直接进入降级模式（无板块成分股映射）")
-            self.degraded_mode = True
-            return True
 
         try:
             self.stock_plate_map = {}
@@ -252,62 +209,40 @@ class PlateAnalyzer:
                 self.plate_rankings['rank'] <= Config.MAX_PLATE_RANK
             ]
 
-            plate_names = top_plates['name'].tolist()
-            logger.info(f"开始获取 {len(plate_names)} 个板块的成分股"
+            # 申万成分股接口用指数代码（如 '801081'），不是板块名称
+            plates_to_fetch = top_plates[['code', 'name']].values.tolist()
+            logger.info(f"开始获取 {len(plates_to_fetch)} 个申万二级行业的成分股"
                         f"（并发数 {Config.PLATE_CONS_MAX_WORKERS}）...")
 
-            def _fetch_one(plate_name):
-                """单个板块成分股获取（线程内执行）"""
+            def _fetch_one(plate_code, plate_name):
+                """单个行业成分股获取（线程内执行）"""
                 try:
-                    throttle('eastmoney')
-                    cons_df = ak.stock_board_industry_cons_em(symbol=plate_name)
+                    throttle('default')
+                    cons_df = ak.index_component_sw(symbol=str(plate_code))
                     if cons_df is None or cons_df.empty:
                         return plate_name, []
-                    cons_df = rename_columns(cons_df, COLUMN_MAP_SPOT)
                     codes = []
-                    for code in cons_df['code']:
-                        # 规范化代码：只保留6位数字
-                        code = str(code).strip()
-                        if len(code) > 6:
-                            code = code[-6:]
+                    for code in cons_df['证券代码']:
+                        # 规范化代码：补齐6位数字
+                        code = str(code).strip().zfill(6)
                         codes.append(code)
                     return plate_name, codes
                 except Exception as e:
-                    logger.warning(f"获取板块 '{plate_name}' 成分股失败: {e}")
+                    logger.warning(f"获取行业 '{plate_name}' 成分股失败: {e}")
                     return plate_name, []
 
-            # 预检模式：先用第一个板块测试东财可用性
-            if Config.PLATE_CONS_PREFLIGHT and plate_names:
-                logger.info(f"预检：测试东财成分股接口（板块: {plate_names[0]}）...")
-                _, preflight_codes = _fetch_one(plate_names[0])
-                if not preflight_codes:
-                    # 预检失败：东财接口整体不可用，直接进入降级模式
-                    logger.warning("预检失败：东财成分股接口不可用，"
-                                   "直接进入降级模式，跳过剩余板块请求")
-                    self.degraded_mode = True
-                    return True
-                # 预检成功：保存第一个板块结果，并发获取剩余板块
-                for code in preflight_codes:
-                    self.stock_plate_map[code] = plate_names[0]
-                logger.info(f"预检成功，继续并发获取剩余 {len(plate_names) - 1} 个板块...")
-                plate_names_to_fetch = plate_names[1:]
-            else:
-                plate_names_to_fetch = plate_names
+            with ThreadPoolExecutor(max_workers=Config.PLATE_CONS_MAX_WORKERS) as executor:
+                futures = {executor.submit(_fetch_one, code, name): (code, name)
+                           for code, name in plates_to_fetch}
+                for future in as_completed(futures):
+                    plate_name, codes = future.result()
+                    for code in codes:
+                        self.stock_plate_map[code] = plate_name
 
-            # 并发获取剩余板块
-            if plate_names_to_fetch:
-                with ThreadPoolExecutor(max_workers=Config.PLATE_CONS_MAX_WORKERS) as executor:
-                    futures = {executor.submit(_fetch_one, name): name
-                               for name in plate_names_to_fetch}
-                    for future in as_completed(futures):
-                        plate_name, codes = future.result()
-                        for code in codes:
-                            self.stock_plate_map[code] = plate_name
-
-            # 降级模式：映射为空说明东财成分股接口全部失败
+            # 降级模式：映射为空说明成分股接口全部失败
             if not self.stock_plate_map:
                 self.degraded_mode = True
-                logger.warning("板块成分股映射为空（东财接口不可用），"
+                logger.warning("板块成分股映射为空，"
                                "降级为遍历涨幅前N只股票模式，跳过板块归属筛选")
             else:
                 self.degraded_mode = False
@@ -371,20 +306,15 @@ class PlateAnalyzer:
             return False
 
     def is_plate_qualified(self, plate_name):
-        """判断板块是否符合条件"""
+        """判断板块是否符合条件（仅检查排名，梯队条件已移除）"""
         stats = self.plate_stats.get(plate_name)
 
         if not stats:
-            return False, "板块数据不存在"
+            # 概念板块无 plate_stats，直接通过
+            return True, "概念板块，跳过梯队检查"
 
         if stats['rank'] > Config.MAX_PLATE_RANK:
             return False, f"板块排名 {stats['rank']}，超过阈值 {Config.MAX_PLATE_RANK}"
-
-        has_enough_tier = (stats['above_5pct'] >= Config.PLATE_MIN_STOCKS_ABOVE_5PCT or
-                           stats['limit_up'] >= Config.PLATE_MIN_STOCKS_LIMIT_UP)
-
-        if not has_enough_tier:
-            return False, f"梯队不足: 涨幅≥5% {stats['above_5pct']}只, 涨停{stats['limit_up']}只"
 
         return True, "符合条件"
 
@@ -590,7 +520,6 @@ class PlateAnalyzer:
             ("计算板块排名", self.calculate_plate_rankings),
             ("获取板块成分股", self.fetch_plate_constituents),
             ("分析板块梯队", self.analyze_plate_tier),
-            ("分析概念板块涨幅", self.fetch_concept_rankings)
         ]
 
         for step_name, step_func in steps:

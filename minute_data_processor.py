@@ -16,57 +16,64 @@ class MinuteDataProcessor:
     def fetch_minute_data(self, code):
         """获取当日分时数据
 
-        注意：akshare 的 stock_zh_a_minute 默认返回最近5个交易日的1分钟数据，
-        必须按当日日期过滤，否则早盘量能、9:45-10:00等条件会混入历史数据。
+        主接口：东财 stock_zh_a_hist_min_em（返回有效价格数据）
+        降级接口：新浪 stock_zh_a_minute（今日价格可能为 NaN）
         """
         code = str(code)
         if code in self.minute_data_cache:
             return self.minute_data_cache[code]
 
+        df = None
+
+        # 主接口：东财分时（返回有效价格数据）
         try:
-            # 新浪接口要求 symbol 带交易所前缀（sh/sz/bj），纯数字会返回空
-            symbol = code_to_symbol(code)
-            throttle('sina')
-            df = ak.stock_zh_a_minute(symbol=symbol, period="1", adjust="qfq")
-
-            if df is None or df.empty:
-                logger.warning(f"获取股票 {code} 分时数据失败（akshare未返回数据）")
-                return None
-
-            # 重命名列（stock_zh_a_minute 返回 day 而非 time）
-            df = rename_columns(df, COLUMN_MAP_MINUTE)
-
-            # 关键修复：只保留当日分时数据
-            # time 列格式形如 "2024-01-15 09:31:00"，提取日期部分匹配今日
-            # 回测模式下使用 Config.TARGET_DATE
-            target_date_str = get_target_date_str()
-            df = df.copy()
-            df['_date_part'] = df['time'].astype(str).str[:10]
-            today_df = df[df['_date_part'] == target_date_str].drop(columns=['_date_part'])
-
-            if today_df.empty:
-                # 非交易时段或当日尚无分时数据，返回空（不缓存，允许下次重试）
-                logger.info(f"股票 {code} 当日({target_date_str})无分时数据（可能非交易时段）")
-                return None
-
-            df = today_df.sort_values('time')
-            df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
-            df['close'] = pd.to_numeric(df['close'], errors='coerce')
-
-            # amount 列可能不存在，用 close*volume 估算
-            # 新浪分时 volume 单位为"股"，amount 单位为"元"，故 amount = close * volume
-            if 'amount' not in df.columns or df['amount'].isna().all():
-                df['amount'] = df['close'] * df['volume']
-            else:
-                df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
-
-            df = df.dropna(subset=['time', 'close', 'volume'])
-
-            self.minute_data_cache[code] = df
-            return df
+            throttle('eastmoney')
+            df = ak.stock_zh_a_hist_min_em(symbol=code, period="1", adjust="qfq")
+            if df is not None and not df.empty:
+                df = rename_columns(df, COLUMN_MAP_MINUTE)
         except Exception as e:
-            logger.error(f"获取股票 {code} 分时数据异常: {e}")
+            logger.warning(f"东财分时接口失败，降级新浪: {e}")
+            df = None
+
+        # 降级接口：新浪分时（symbol 需带交易所前缀）
+        if df is None or df.empty:
+            try:
+                symbol = code_to_symbol(code)
+                throttle('sina')
+                df = ak.stock_zh_a_minute(symbol=symbol, period="1", adjust="qfq")
+                if df is not None and not df.empty:
+                    df = rename_columns(df, COLUMN_MAP_MINUTE)
+            except Exception as e:
+                logger.error(f"获取股票 {code} 分时数据异常: {e}")
+                return None
+
+        if df is None or df.empty:
+            logger.warning(f"获取股票 {code} 分时数据失败（所有接口均未返回数据）")
             return None
+
+        # 以下为原有逻辑：日期过滤、类型转换、缓存
+        target_date_str = get_target_date_str()
+        df = df.copy()
+        df['_date_part'] = df['time'].astype(str).str[:10]
+        today_df = df[df['_date_part'] == target_date_str].drop(columns=['_date_part'])
+
+        if today_df.empty:
+            logger.info(f"股票 {code} 当日({target_date_str})无分时数据（可能非交易时段）")
+            return None
+
+        df = today_df.sort_values('time')
+        df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+
+        if 'amount' not in df.columns or df['amount'].isna().all():
+            df['amount'] = df['close'] * df['volume']
+        else:
+            df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+
+        df = df.dropna(subset=['time', 'close', 'volume'])
+
+        self.minute_data_cache[code] = df
+        return df
 
     def fetch_yesterday_volume(self, code, daily_df=None):
         """获取昨日全天成交量

@@ -218,6 +218,10 @@ class StockFilter:
         try:
             mkt_cap = stock_info.get('circulating_market_cap', 0)
 
+            # 市值数据缺失（新浪降级模式无流通市值）时，跳过市值筛选
+            if not mkt_cap or mkt_cap == 0:
+                return True
+
             # 字符串处理
             if isinstance(mkt_cap, str):
                 mkt_cap = mkt_cap.replace(',', '').strip()
