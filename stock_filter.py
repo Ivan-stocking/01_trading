@@ -63,18 +63,21 @@ class StockFilter:
         节流：按数据源分组（eastmoney/sina），同源内串行，不同源可并行。
         """
         code = str(code)
-        # 如果已缓存且条数足够，直接返回
+        # 已缓存且条数足够，直接返回
         if code in self.stock_data_cache:
             cached = self.stock_data_cache[code]
             if cached is not None and len(cached) >= days:
                 return cached
 
+        # 性能优化：首次获取统一取 250 交易日窗口，覆盖日线MA20/涨停基因20日/
+        # 周线重采样MA20（需~205日）等全部调用场景；后续不同 days 参数的调用
+        # 直接复用缓存，避免同一只股票因 days=5/60/205 三次请求新浪接口。
+        fetch_days = max(days, 250)
         end_date = get_end_date()
         if Config.TARGET_DATE:
-            start_date = (datetime.strptime(Config.TARGET_DATE, '%Y-%m-%d') - timedelta(days=days * 2)).strftime('%Y%m%d')
-            
+            start_date = (datetime.strptime(Config.TARGET_DATE, '%Y-%m-%d') - timedelta(days=fetch_days * 2)).strftime('%Y%m%d')
         else:
-            start_date = (datetime.now() - timedelta(days=days * 2)).strftime('%Y%m%d')
+            start_date = (datetime.now() - timedelta(days=fetch_days * 2)).strftime('%Y%m%d')
 
         df = None
 
@@ -530,33 +533,19 @@ class StockFilter:
             return result
 
         # 流通市值筛选
-        # 优先用东财实时市值；东财不可用（新浪降级模式）时用日线数据反推
+        # 实时市值可用（东财）时立即筛选（无网络开销）；
+        # 新浪降级模式市值缺失，延后到日线数据获取后反推，复用缓存，
+        # 避免为每只股票提前发起网络请求（未通过板块/趋势检查的股票可0请求）
         mkt_cap = stock_info.get('circulating_market_cap', 0)
+        need_mktcap_estimate = False
         if mkt_cap and float(mkt_cap) != 0:
             # 东财实时市值
             if not self.check_market_cap(stock_info):
                 result['reasons'].append(f"流通市值不足 {Config.MIN_CIRCULATION_MKT_CAP} 亿")
                 return result
         else:
-            # 新浪降级模式：从日线数据反推流通市值
-            estimated_mv = self._estimate_market_cap_from_daily(result['code'])
-            # 只有反推成功且结果合理时才进行筛选
-            # 反推失败（estimated_mv=0）或结果异常小时，跳过市值筛选
-            # 在新浪降级模式下，反推市值的可靠性较低，放宽筛选条件
-            if estimated_mv > 0:
-                if estimated_mv >= Config.MIN_CIRCULATION_MKT_CAP:
-                    # 反推市值足够大，保留
-                    result['details']['estimated_mv'] = round(estimated_mv, 2)
-                elif estimated_mv >= 50:
-                    # 反推市值在50-150亿之间，保留但标记为低可靠性
-                    result['details']['estimated_mv'] = round(estimated_mv, 2)
-                    logger.debug(f"股票 {result['code']} 反推市值 {estimated_mv:.1f}亿，低于阈值但保留")
-                else:
-                    # 反推市值太小或不可靠，跳过市值筛选（不淘汰）
-                    logger.debug(f"股票 {result['code']} 反推市值 {estimated_mv:.1f}亿，不可靠，跳过市值筛选")
-            else:
-                # 反推失败，跳过市值筛选
-                logger.debug(f"股票 {result['code']} 反推市值失败，跳过市值筛选")
+            # 新浪降级模式：延后反推，先做廉价过滤
+            need_mktcap_estimate = True
 
         # 板块筛选（降级模式下 plate 为空，跳过板块筛选）
         if result['plate']:
@@ -593,6 +582,13 @@ class StockFilter:
             result['reasons'].append(weekly_trend_msg)
             return result
         result['details']['weekly_trend'] = weekly_trend_msg
+
+        # 降级模式流通市值反推（复用已缓存的日线数据，不产生额外网络请求）
+        # 注：新浪降级模式下反推可靠性低，原逻辑仅记录不淘汰，此处保持一致
+        if need_mktcap_estimate:
+            estimated_mv = self._estimate_market_cap_from_daily(result['code'])
+            if estimated_mv > 0:
+                result['details']['estimated_mv'] = round(estimated_mv, 2)
 
         bias_ok, bias_msg, bias_value = self.check_bias(daily_df, result['current_price'])
         result['details']['bias'] = bias_value
