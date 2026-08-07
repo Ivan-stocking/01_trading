@@ -10,7 +10,7 @@ class Config:
     EARLY_VOLUME_RATIO_THRESHOLD = 0.35
 
     BIAS_LOWER_BOUND = -2.0
-    BIAS_UPPER_BOUND = 5.0
+    BIAS_UPPER_BOUND = 8.0
 
     PLATE_TOP_PERCENTILE = 0.10
     PLATE_MIN_STOCKS_ABOVE_5PCT = 3
@@ -28,7 +28,7 @@ class Config:
     RESISTANCE_LIMIT = 15
     PROFIT_RATE_LIMIT = 70
 
-    MAX_PLATE_RANK = 25                  # 行业板块排名上限（取前25个申万二级行业）
+    MAX_PLATE_RANK = 50                  # 行业板块排名上限（取前50个申万二级行业）
 
     LONG_SHADOW_WINDOW = 3
     LONG_SHADOW_RATIO = 2.0

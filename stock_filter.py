@@ -291,12 +291,33 @@ class StockFilter:
             logger.debug(f"反推流通市值异常 {code}: {e}")
             return 0
 
-    def check_daily_trend(self, df):
-        """检查日线多头排列"""
+    def check_daily_trend(self, df, current_price=None):
+        """检查日线多头排列
+
+        参数:
+            df: 日线 DataFrame（含 close/ma5/ma10/ma20 列）
+            current_price: 当日实时价格。若日线最新日期不是今日，
+                          则将 current_price 作为今日收盘追加到 df，
+                          重新计算 MA5/MA10/MA20，再做多头排列判定。
+                          这样盘中即可用实时价判定均线，而非仅依赖昨日收盘。
+        """
         if df is None or len(df) < 20:
             return False, "日线数据不足"
 
         try:
+            # 如果传入了实时价，且日线最新日期不是今天，追加今日行并重算均线
+            if current_price is not None and current_price > 0:
+                today_str = get_target_date_str()
+                last_date = str(df.iloc[-1]['date'])[:10]
+                if last_date != today_str:
+                    new_row = df.iloc[-1].copy()
+                    new_row['date'] = today_str
+                    new_row['close'] = float(current_price)
+                    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                    df['ma5'] = df['close'].rolling(window=5).mean()
+                    df['ma10'] = df['close'].rolling(window=10).mean()
+                    df['ma20'] = df['close'].rolling(window=20).mean()
+
             latest = df.iloc[-1]
 
             if pd.isna(latest['ma5']) or pd.isna(latest['ma10']) or pd.isna(latest['ma20']):
@@ -580,7 +601,8 @@ class StockFilter:
             result['reasons'].append("上市不足60日")
             return result
 
-        daily_trend_ok, daily_trend_msg = self.check_daily_trend(daily_df)
+        daily_trend_ok, daily_trend_msg = self.check_daily_trend(
+            daily_df, current_price=result.get('current_price', 0))
         if not daily_trend_ok:
             result['reasons'].append(daily_trend_msg)
             return result
