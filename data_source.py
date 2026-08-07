@@ -91,12 +91,13 @@ def check_eastmoney_available():
         return _eastmoney_push2_available
 
     try:
-        # 用一个最轻量的接口测试（行业板块列表，pn=1&pz=1 只取1条）
+        # 测试实际的 A 股数据端点 82.push2（而非 17.push2），
+        # 因为 17.push2 可能在代理环境下可用但 82.push2 不可用，导致假阳性
         throttle('eastmoney')
         r = _original_requests_get(
-            'https://17.push2.eastmoney.com/api/qt/clist/get',
+            'https://82.push2.eastmoney.com/api/qt/clist/get',
             params={'pn': '1', 'pz': '1', 'fltt': '2', 'invt': '2',
-                    'fid': 'f3', 'fs': 'm:90+t:2', 'fields': 'f12'},
+                    'fid': 'f3', 'fs': 'm:0+t:6', 'fields': 'f12'},
             headers=_BROWSER_HEADERS,
             timeout=8
         )

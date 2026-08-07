@@ -68,7 +68,7 @@ class Config:
 
     # ---- 板块成分股并发获取 ----
     PLATE_CONS_MAX_WORKERS = 10            # 线程池并发数（同花顺概念涨幅获取）
-    STOCK_FILTER_MAX_WORKERS = 8           # 个股筛选线程池并发数
+    STOCK_FILTER_MAX_WORKERS = 20           # 个股筛选线程池并发数
 
     # ---- 网络请求超时与预检 ----
     # 单次 akshare 请求的 socket 超时（秒），避免东财接口不可用时长时间等待
@@ -79,10 +79,10 @@ class Config:
     # ---- 请求节流（防 IP 封禁）----
     # 同一数据源内两次请求的最小间隔（秒），不同数据源可并行
     # 按数据源独立配置：东财风控严，新浪/同花顺中等
-    REQUEST_INTERVAL_EASTMONEY = 2.0   # 东财 push2 风控严格
-    REQUEST_INTERVAL_SINA = 1.0        # 新浪相对宽松
+    REQUEST_INTERVAL_EASTMONEY = 0.5   # 东财 push2 风控严格
+    REQUEST_INTERVAL_SINA = 0.3        # 新浪相对宽松
     REQUEST_INTERVAL_THS = 1.0         # 同花顺相对宽松
-    REQUEST_INTERVAL_DEFAULT = 1.0     # 默认间隔
+    REQUEST_INTERVAL_DEFAULT = 0.5     # 默认间隔
 
     # ---- 股票范围限定 ----
     # 仅扫描沪深主板股票（60/00开头），排除创业板(30)/科创板(68)/北交所(43/83/87/88/92/920)
