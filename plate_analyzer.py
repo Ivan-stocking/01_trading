@@ -4,8 +4,8 @@ import numpy as np
 import logging
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from config import Config, rename_columns, COLUMN_MAP_PLATE, COLUMN_MAP_SPOT, COLUMN_MAP_INDEX, COLUMN_MAP_CONCEPT, COLUMN_MAP_SW, symbol_to_code, get_end_date
-from data_source import throttle, is_eastmoney_available
+from config import Config, rename_columns, COLUMN_MAP_SPOT, COLUMN_MAP_SW, symbol_to_code, get_end_date
+from data_source import throttle
 
 logger = logging.getLogger(__name__)
 
@@ -61,47 +61,23 @@ class PlateAnalyzer:
     def fetch_all_a_stocks(self):
         """获取全市场A股实时数据
 
-        优先东财接口（stock_zh_a_spot_em，含市值），失败降级新浪接口
-        （stock_zh_a_spot，代码带 sh/sz/bj 前缀，无流通市值/换手率）。
-        新浪接口的代码统一转为纯数字（6位）以便与板块成分股映射匹配。
+        使用新浪接口（stock_zh_a_spot，代码带 sh/sz/bj 前缀，无流通市值/换手率）。
+        代码统一转为纯数字（6位）以便与板块成分股映射匹配。
         """
         try:
             logger.info("正在获取全市场A股实时数据...")
 
-            # 优先东财接口；东财不可用直接走新浪
-            use_sina_fallback = True
-            if is_eastmoney_available():
-                try:
-                    throttle('eastmoney')
-                    self.all_a_stocks = ak.stock_zh_a_spot_em()
-                    if self.all_a_stocks is not None and not self.all_a_stocks.empty:
-                        self.all_a_stocks = rename_columns(self.all_a_stocks, COLUMN_MAP_SPOT)
-                        self.all_a_stocks['code'] = self.all_a_stocks['code'].astype(str).str.zfill(6)
-                        logger.info(f"东财接口成功，获取 {len(self.all_a_stocks)} 只A股")
-                        use_sina_fallback = False
-                except Exception as e:
-                    logger.warning(f"东财A股接口失败: {e}")
-                    self.all_a_stocks = None
-            else:
-                logger.info("东财不可用，直接使用新浪A股接口")
-
-            # 降级新浪接口
-            if use_sina_fallback:
-                logger.warning("降级使用新浪A股接口（无流通市值/换手率）")
-                throttle('sina')
-                self.all_a_stocks = ak.stock_zh_a_spot()
-                if self.all_a_stocks is None or self.all_a_stocks.empty:
-                    logger.error("新浪接口也失败")
-                    return False
-                self.all_a_stocks = rename_columns(self.all_a_stocks, COLUMN_MAP_SPOT)
-                # 新浪代码带 sh/sz/bj 前缀，统一转为纯数字6位
-                self.all_a_stocks['code'] = self.all_a_stocks['code'].apply(
-                    lambda x: symbol_to_code(x).zfill(6))
-                # 新浪无流通市值列，用 0 占位（check_market_cap 会跳过该筛选）
-                if 'circulating_market_cap' not in self.all_a_stocks.columns:
-                    self.all_a_stocks['circulating_market_cap'] = 0
-                    logger.warning("新浪接口无流通市值数据，市值筛选将失效")
-                logger.info(f"新浪接口成功，获取 {len(self.all_a_stocks)} 只A股")
+            logger.info("使用新浪A股接口获取实时数据")
+            throttle('sina')
+            self.all_a_stocks = ak.stock_zh_a_spot()
+            if self.all_a_stocks is None or self.all_a_stocks.empty:
+                logger.error("新浪A股接口失败")
+                return False
+            self.all_a_stocks = rename_columns(self.all_a_stocks, COLUMN_MAP_SPOT)
+            # 新浪代码带 sh/sz/bj 前缀，统一转为纯数字6位
+            self.all_a_stocks['code'] = self.all_a_stocks['code'].apply(
+                lambda x: symbol_to_code(x).zfill(6))
+            logger.info(f"新浪接口成功，获取 {len(self.all_a_stocks)} 只A股")
 
             # 确保关键列是数值类型
             self.all_a_stocks['change_percent'] = pd.to_numeric(
@@ -367,23 +343,8 @@ class PlateAnalyzer:
     def get_all_a_index_change(self):
         """获取全A指数涨幅
 
-        优先东财指数接口，失败时降级为全A股平均涨幅。
+        使用全A股平均涨幅作为基准（东财接口不稳定，已移除）。
         """
-        # 优先东财指数接口；东财不可用直接走全A平均涨幅
-        if is_eastmoney_available():
-            try:
-                throttle('eastmoney')
-                index_data = ak.stock_zh_index_spot_em()
-                index_data = rename_columns(index_data, COLUMN_MAP_INDEX)
-                all_a = index_data[index_data['name'].str.contains('全A', na=False)]
-                if not all_a.empty:
-                    return float(all_a.iloc[0]['change_percent'])
-            except Exception as e:
-                logger.warning(f"东财指数接口失败，将使用全A平均涨幅: {e}")
-        else:
-            logger.info("东财不可用，使用全A平均涨幅替代指数涨幅")
-
-        # 降级：用全A股平均涨幅
         if self.all_a_stocks is not None and not self.all_a_stocks.empty:
             avg = float(self.all_a_stocks['change_percent'].mean())
             logger.info(f"使用全A股平均涨幅作为基准: {avg:.2f}%")
@@ -400,30 +361,14 @@ class PlateAnalyzer:
         数据源：
           - stock_board_concept_name_ths: 获取概念名称列表（仅 name/code）
           - stock_board_concept_info_ths: 逐个获取概念涨幅（返回今开/昨收/涨幅等）
-        东财接口（stock_board_concept_name_em/spot_em）不可用时使用同花顺降级。
         """
         try:
-            # 优先东财概念板块接口（含涨幅）；东财不可用直接走同花顺
+            # 使用同花顺概念板块接口（东财接口不稳定，已移除）
             concept_df = None
-            if is_eastmoney_available():
-                try:
-                    throttle('eastmoney')
-                    concept_df = ak.stock_board_concept_name_em()
-                    if concept_df is not None and not concept_df.empty:
-                        concept_df = rename_columns(concept_df, COLUMN_MAP_CONCEPT)
-                        concept_df['change_percent'] = pd.to_numeric(
-                            concept_df['change_percent'].astype(str).str.replace('%', ''),
-                            errors='coerce')
-                        logger.info(f"东财概念接口成功，获取 {len(concept_df)} 个概念")
-                except Exception as e:
-                    logger.warning(f"东财概念接口失败，降级同花顺: {e}")
-                    concept_df = None
-            else:
-                logger.info("东财不可用，直接使用同花顺概念板块接口")
 
-            # 降级同花顺：逐个获取概念涨幅
+            # 同花顺：逐个获取概念涨幅
             if concept_df is None or concept_df.empty:
-                logger.info("降级使用同花顺概念板块接口（逐个获取涨幅）...")
+                logger.info("使用同花顺概念板块接口（逐个获取涨幅）...")
                 throttle('ths')
                 name_df = ak.stock_board_concept_name_ths()
                 if name_df is None or name_df.empty:

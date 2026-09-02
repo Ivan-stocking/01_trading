@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import Config
-from data_source import throttle, check_eastmoney_available
+from data_source import throttle
 
 logging.basicConfig(
     level=getattr(logging, Config.LOG_LEVEL),
@@ -18,9 +18,7 @@ logger = logging.getLogger(__name__)
 # 输出个股数量上限（统一从 Config 读取，便于集中调整）
 TOP_STOCK_MAX = Config.TOP_STOCK_MAX
 
-# 降级模式下遍历的涨幅前N只股票数量（东财板块成分股不可用时使用）
-# 注：东财 UA 修复后大部分场景可走正常模式，降级模式仅在东财完全不可用时触发
-# 按数据源分组节流后并发性能良好，可适当提高扫描数量
+# 降级模式下遍历的涨幅前N只股票数量（板块成分股接口不可用时使用）
 DEGRADED_SCAN_COUNT = 100
 
 
@@ -88,26 +86,6 @@ def is_trading_day():
     return True
 
 
-def format_market_cap(value):
-    """格式化流通市值显示
-
-    akshare 返回的流通市值单位为元，统一转为亿元显示。
-    兼容：数值（元）、带"亿"字符串、纯数值字符串（元）。
-    """
-    try:
-        if isinstance(value, str):
-            value = value.replace(',', '').strip()
-            if '亿' in value:
-                # 已是亿元单位
-                return f"{float(value.replace('亿', '')):.2f}亿"
-            # 元单位字符串
-            return f"{float(value) / 1e8:.2f}亿"
-        # 数值型：元为单位
-        return f"{float(value) / 1e8:.2f}亿"
-    except Exception:
-        return str(value)
-
-
 def _filter_one_stock(code, stock_row, plate_name, stock_filter, minute_processor):
     """单只股票筛选（线程内执行）
 
@@ -124,8 +102,7 @@ def _filter_one_stock(code, stock_row, plate_name, stock_filter, minute_processo
             'name': stock_row.get('name', ''),
             'industry': plate_name if plate_name else '',
             'current_price': stock_row.get('current_price', 0),
-            'change_percent': stock_row.get('change_percent', 0),
-            'circulating_market_cap': stock_row.get('circulating_market_cap', 0)
+            'change_percent': stock_row.get('change_percent', 0)
         }
 
         stock_result = stock_filter.filter_stock(stock_info)
@@ -199,7 +176,7 @@ def _filter_stocks_concurrent(scan_list, plate_analyzer, stock_filter, minute_pr
 def _write_analysis_records(records):
     """将所有分析过的股票记录写入 CSV 文件
 
-    记录每只股票的代码、名称、板块、涨幅、市值、各项指标、是否通过、失败原因。
+    记录每只股票的代码、名称、板块、涨幅、各项指标、是否通过、失败原因。
     文件名: stock_analysis_records.csv（追加模式，含日期时间列）
     """
     import csv
@@ -210,7 +187,7 @@ def _write_analysis_records(records):
 
     # CSV 列定义（失败原因前置，仅保留筛选阶段即可确定的基础字段）
     fieldnames = [
-        '分析时间', '代码', '名称', '所属板块', '当前涨跌幅(%)', '流通市值(亿)',
+        '分析时间', '代码', '名称', '所属板块', '当前涨跌幅(%)',
         '失败原因',
         '最近涨停日', '综合评分', 'filter_stock是否通过',
         '分钟条件是否通过', '分钟失败原因',
@@ -226,13 +203,6 @@ def _write_analysis_records(records):
             for stock_result, minute_result in records:
                 details = stock_result.get('details', {}) or {}
                 reasons = stock_result.get('reasons', []) or []
-
-                # 格式化市值为亿元
-                mkt_cap = stock_result.get('circulating_market_cap', 0)
-                try:
-                    mkt_cap_yi = float(mkt_cap) / 1e8 if mkt_cap else 0
-                except (ValueError, TypeError):
-                    mkt_cap_yi = 0
 
                 # 最近涨停日（仅通过涨停基因检查的股票才有）
                 zt_dates = details.get('zt_dates', []) or []
@@ -252,7 +222,6 @@ def _write_analysis_records(records):
                     '名称': stock_result.get('name', ''),
                     '所属板块': stock_result.get('plate', ''),
                     '当前涨跌幅(%)': round(stock_result.get('change_percent', 0), 2),
-                    '流通市值(亿)': round(mkt_cap_yi, 2),
                     '失败原因': '; '.join(reasons) if reasons else ('通过' if stock_result.get('passed') else ''),
                     '最近涨停日': last_zt,
                     '综合评分': round(details.get('ranking_score', 0), 1) if details.get('ranking_score') is not None else '',
@@ -287,10 +256,6 @@ def run_filter():
         from plate_analyzer import PlateAnalyzer
         from stock_filter import StockFilter
         from minute_data_processor import MinuteDataProcessor
-
-        # 启动时检测东财 push2 API 可用性（一次性，避免每只股票等超时）
-        logger.info("检测东财 push2 API 可用性...")
-        check_eastmoney_available()
 
         logger.info("初始化模块...")
 
@@ -377,7 +342,6 @@ def _select_plate_stocks(passed_stocks, plate_analyzer):
     返回: 前 TOP_STOCK_MAX 只股票列表，每只额外填充展示字段：
         - dimension_name: 所属板块名称
         - dimension_change: 板块当前涨跌幅
-        - bias: 乖离率
         - last_zt_date: 最近涨停日期
     """
     def _fill_display_fields(stock, dim_name, dim_change):
@@ -385,7 +349,6 @@ def _select_plate_stocks(passed_stocks, plate_analyzer):
         s['dimension_name'] = dim_name or '-'
         s['dimension_change'] = dim_change
         details = s.get('details', {}) or {}
-        s['bias'] = details.get('bias', 0)
         zt_dates = details.get('zt_dates', []) or []
         s['last_zt_date'] = zt_dates[0]['date'] if zt_dates else '-'
         return s
@@ -438,7 +401,7 @@ def print_results(plate_stocks, all_a_index_change, plate_analyzer):
 def _print_stock_table(stocks, dimension_label='板块'):
     """打印股票表格
 
-    列：排名 | 股票名称 | 代码 | 当前涨跌幅 | 所属{板块/概念} | {板块/概念}涨跌幅 | 乖离率 | 最近涨停日 | 仓位建议
+    列：排名 | 股票名称 | 代码 | 当前涨跌幅 | 所属{板块/概念} | {板块/概念}涨跌幅 | 最近涨停日 | 仓位建议
 
     参数:
         stocks: 股票列表（已通过 _select_by_dimension 填充展示字段）
@@ -454,7 +417,6 @@ def _print_stock_table(stocks, dimension_label='板块'):
               f"{'当前涨跌幅':<12}"
               f"{'所属' + dimension_label:<18}"
               f"{dimension_label + '涨跌幅':<14}"
-              f"{'乖离率':<10}"
               f"{'最近涨停日':<14}"
               f"{'仓位建议'}")
     print(header)
@@ -477,10 +439,6 @@ def _print_stock_table(stocks, dimension_label='板块'):
         dim_change = stock.get('dimension_change', 0) or 0
         dim_change_str = f"{dim_change:+.2f}%"
 
-        # 乖离率
-        bias = stock.get('bias', 0) or 0
-        bias_str = f"{bias:+.2f}%"
-
         # 最近涨停日
         last_zt = str(stock.get('last_zt_date', '-') or '-')
 
@@ -493,7 +451,6 @@ def _print_stock_table(stocks, dimension_label='板块'):
                 f"{change_str:<12}"
                 f"{dim_name_display:<18}"
                 f"{dim_change_str:<14}"
-                f"{bias_str:<10}"
                 f"{last_zt:<14}"
                 f"{comment}")
         print(line)

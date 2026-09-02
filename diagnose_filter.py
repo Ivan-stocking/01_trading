@@ -16,7 +16,6 @@ logging.basicConfig(
 sys.stdout = open(sys.stdout.fileno(), 'w', buffering=1)
 
 from config import Config
-from data_source import check_eastmoney_available
 from plate_analyzer import PlateAnalyzer
 from stock_filter import StockFilter
 
@@ -26,7 +25,6 @@ def main():
     print("诊断行业前50成分股筛选失败原因", flush=True)
     print("=" * 80, flush=True)
 
-    check_eastmoney_available()
     plate_analyzer = PlateAnalyzer()
     stock_filter = StockFilter(plate_analyzer)
 
@@ -54,9 +52,9 @@ def main():
     # 第一失败原因分布 + 通过初筛的股票
     first_reason_counter = Counter()
     all_reasons_counter = Counter()  # 所有失败原因（不只第一个）
-    passed_market_cap = []  # 通过市值+ST+主板初筛
-    passed_filter = []      # 通过 filter_stock
-    near_miss = []          # 接近通过（只差1-2个条件）
+    passed_basic = []        # 通过ST+主板初筛
+    passed_filter = []       # 通过 filter_stock
+    near_miss = []           # 接近通过（只差1-2个条件）
 
     def _filter_one(stock_row):
         code = str(stock_row.get('code', ''))
@@ -65,8 +63,7 @@ def main():
             'name': stock_row.get('name', ''),
             'industry': '',
             'current_price': stock_row.get('current_price', 0),
-            'change_percent': stock_row.get('change_percent', 0),
-            'circulating_market_cap': stock_row.get('circulating_market_cap', 0)
+            'change_percent': stock_row.get('change_percent', 0)
         }
         try:
             result = stock_filter.filter_stock(stock_info)
@@ -105,9 +102,9 @@ def main():
                 if len(soft_reasons) <= 2:
                     near_miss.append((code, stock_row, reasons))
 
-                # 通过市值+ST+主板初筛
+                # 通过ST+主板初筛
                 if not any(h in first_reason for h in hard_excludes):
-                    passed_market_cap.append((code, stock_row, reasons))
+                    passed_basic.append((code, stock_row, reasons))
 
             if completed % 300 == 0:
                 print(f"  进度: {completed}/{total}", flush=True)
@@ -118,7 +115,7 @@ def main():
     print("=" * 80, flush=True)
     print(f"总股票数: {total}", flush=True)
     print(f"通过 filter_stock: {len(passed_filter)} 只", flush=True)
-    print(f"通过市值+ST+主板初筛（排除硬性条件）: {len(passed_market_cap)} 只", flush=True)
+    print(f"通过ST+主板初筛（排除硬性条件）: {len(passed_basic)} 只", flush=True)
 
     print(f"\n--- 第一失败原因分布 ---", flush=True)
     for reason, count in first_reason_counter.most_common(20):

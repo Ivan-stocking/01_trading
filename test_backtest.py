@@ -101,7 +101,7 @@ def run_debug_top(target_date, top_n):
 
     用于排查回测 0 只通过的具体原因。输出：
       1. 每只股票的第一失败原因（归一化后）的分布统计
-      2. 通过初筛（市值+ST+主板）的股票列表及下一关失败原因
+      2. 通过初筛（ST+主板）的股票列表及下一关失败原因
       3. 每只股票的详细信息（可选）
     """
     from config import Config
@@ -110,9 +110,6 @@ def run_debug_top(target_date, top_n):
 
     import main as main_module
     main_module.is_trading_day = lambda: True
-
-    from data_source import check_eastmoney_available
-    check_eastmoney_available()
 
     from plate_analyzer import PlateAnalyzer
     from stock_filter import StockFilter
@@ -142,7 +139,7 @@ def run_debug_top(target_date, top_n):
     print("=" * 100)
 
     first_reason_counter = Counter()        # 第一失败原因分布
-    passed_market_cap = []                  # 通过市值+ST+主板初筛的股票
+    passed_basic = []                       # 通过ST+主板初筛的股票
     passed_filter_stock = []                # 通过 filter_stock 的股票
 
     for _, stock_row in top_stocks.iterrows():
@@ -150,12 +147,9 @@ def run_debug_top(target_date, top_n):
         name = stock_row.get('name', '')
         change = stock_row.get('change_percent', 0)
         price = stock_row.get('current_price', 0)
-        mkt_cap = stock_row.get('circulating_market_cap', 0)
-
         stock_info = {
             'code': code, 'name': name, 'industry': '',
-            'current_price': price, 'change_percent': change,
-            'circulating_market_cap': mkt_cap
+            'current_price': price, 'change_percent': change
         }
 
         try:
@@ -166,9 +160,9 @@ def run_debug_top(target_date, top_n):
             normalized = re.sub(r'\d+', 'N', normalized)
             first_reason_counter[normalized] += 1
 
-            if '流通市值不足' not in first_reason and 'ST' not in first_reason \
+            if 'ST' not in first_reason \
                     and '非沪深主板' not in first_reason and '停牌' not in first_reason:
-                passed_market_cap.append(
+                passed_basic.append(
                     (code, name, change, first_reason, result.get('details', {})))
 
             if result['passed']:
@@ -186,11 +180,10 @@ def run_debug_top(target_date, top_n):
         print(f"  {count:4d} 次  {reason}")
 
     # 2. 通过初筛的股票
-    print(f"\n--- 通过市值+ST+主板 筛选的股票（共 {len(passed_market_cap)} 只）---")
-    for code, name, change, reason, details in passed_market_cap:
-        est_mv = details.get('estimated_mv', '?')
+    print(f"\n--- 通过ST+主板 筛选的股票（共 {len(passed_basic)} 只）---")
+    for code, name, change, reason, details in passed_basic:
         print(f"  {code} {name:10s} 涨幅 {change:.2f}%  "
-              f"下一关失败: {reason}  反推市值 {est_mv}亿")
+              f"下一关失败: {reason}")
 
     # 3. 通过 filter_stock 的股票 + 分钟条件诊断
     print(f"\n--- 通过 filter_stock 的股票（共 {len(passed_filter_stock)} 只）---")

@@ -1,10 +1,9 @@
 import akshare as ak
 import pandas as pd
-import numpy as np
 import logging
 from datetime import datetime, timedelta
 from config import Config, rename_columns, COLUMN_MAP_HIST, code_to_symbol, get_end_date, get_target_date_str
-from data_source import throttle, is_eastmoney_available
+from data_source import throttle
 
 logger = logging.getLogger(__name__)
 
@@ -51,16 +50,11 @@ class StockFilter:
     def fetch_daily_data(self, code, days=60):
         """获取日线数据（带缓存）
 
-        数据源降级链：
-          - 东财可用：东财 → 新浪
-          - 东财不可用：新浪
-
-        原因：东财 push2 API 受 IP 级风控，启动时检测一次，不可用则
-        全局禁用东财接口，避免每只股票都等待超时浪费 8-15 秒。
+        数据源：新浪接口（东财接口不稳定，已移除）。
 
         回测模式（Config.TARGET_DATE 非空）下 end_date 设为 TARGET_DATE。
 
-        节流：按数据源分组（eastmoney/sina），同源内串行，不同源可并行。
+        节流：同源内串行。
         """
         code = str(code)
         # 如果已缓存且条数足够，直接返回
@@ -72,34 +66,20 @@ class StockFilter:
         end_date = get_end_date()
         if Config.TARGET_DATE:
             start_date = (datetime.strptime(Config.TARGET_DATE, '%Y-%m-%d') - timedelta(days=days * 2)).strftime('%Y%m%d')
-            
+
         else:
             start_date = (datetime.now() - timedelta(days=days * 2)).strftime('%Y%m%d')
 
         df = None
-
-        # 东财可用时优先东财，否则直接跳过东财（避免每只股票等 8-15 秒超时）
-        if is_eastmoney_available():
-            try:
-                throttle('eastmoney')
-                df = ak.stock_zh_a_hist(
-                    symbol=code, period="daily",
-                    start_date=start_date, end_date=end_date, adjust="qfq"
-                )
-            except Exception:
-                pass
-
-        # 东财失败或东财不可用：降级新浪
-        if df is None or df.empty:
-            try:
-                throttle('sina')
-                symbol = code_to_symbol(code)
-                df = ak.stock_zh_a_daily(
-                    symbol=symbol, start_date=start_date, end_date=end_date, adjust="qfq"
-                )
-            except Exception as e:
-                logger.error(f"股票 {code} 日线数据所有源均失败: {e}")
-                return None
+        try:
+            throttle('sina')
+            symbol = code_to_symbol(code)
+            df = ak.stock_zh_a_daily(
+                symbol=symbol, start_date=start_date, end_date=end_date, adjust="qfq"
+            )
+        except Exception as e:
+            logger.error(f"股票 {code} 日线数据获取失败: {e}")
+            return None
 
         if df is None or df.empty:
             return None
@@ -127,9 +107,7 @@ class StockFilter:
     def fetch_weekly_data(self, code, weeks=25):
         """获取周线数据（带缓存）
 
-        数据源降级链：
-          1. AKShare 东财周线接口
-          2. 从日线数据重采样为周线（W-FRI）
+        从日线数据重采样为周线（W-FRI）。
 
         回测模式下 end_date 设为 TARGET_DATE。
         weeks 默认 25 周（确保足够计算 MA20 均线）。
@@ -140,34 +118,15 @@ class StockFilter:
         if code in self.weekly_data_cache:
             return self.weekly_data_cache[code]
 
-        end_date = get_end_date()
-        if Config.TARGET_DATE:
-            start_date = (datetime.strptime(Config.TARGET_DATE, '%Y-%m-%d') - timedelta(weeks=weeks + 4)).strftime('%Y%m%d')
-            
-        else:
-            start_date = (datetime.now() - timedelta(weeks=weeks + 4)).strftime('%Y%m%d')
-
-        # 第1级：东财周线接口（东财不可用时直接跳过）
+        # 从日线数据重采样为周线
         df = None
-        if is_eastmoney_available():
-            try:
-                throttle('eastmoney')
-                df = ak.stock_zh_a_hist(
-                    symbol=code, period="weekly",
-                    start_date=start_date, end_date=end_date, adjust="qfq"
-                )
-            except Exception:
-                pass
-
-        # 第2级：东财失败或不可用，从日线数据重采样为周线
-        if df is None or df.empty:
-            try:
-                daily_df = self.fetch_daily_data(code, days=weeks * 7 + 30)
-                if daily_df is not None and not daily_df.empty:
-                    df = self._resample_to_weekly(daily_df)
-            except Exception as e:
-                logger.error(f"股票 {code} 周线数据所有源均失败: {e}")
-                return None
+        try:
+            daily_df = self.fetch_daily_data(code, days=weeks * 7 + 30)
+            if daily_df is not None and not daily_df.empty:
+                df = self._resample_to_weekly(daily_df)
+        except Exception as e:
+            logger.error(f"股票 {code} 周线数据获取失败: {e}")
+            return None
 
         if df is None or df.empty:
             return None
@@ -207,89 +166,6 @@ class StockFilter:
             return weekly
         except Exception:
             return None
-
-    def check_market_cap(self, stock_info):
-        """检查流通市值
-
-        akshare 的 stock_zh_a_spot_em 返回的 `流通市值` 单位为**元**（数值很大），
-        需转换为亿元后再与 Config.MIN_CIRCULATION_MKT_CAP（单位：亿）比较。
-        兼容三种输入：纯数值（元）、带"亿"字符串、纯数值字符串（元）。
-        """
-        try:
-            mkt_cap = stock_info.get('circulating_market_cap', 0)
-
-            # 市值数据缺失（新浪降级模式无流通市值）时，跳过市值筛选
-            if not mkt_cap or mkt_cap == 0:
-                return True
-
-            # 字符串处理
-            if isinstance(mkt_cap, str):
-                mkt_cap = mkt_cap.replace(',', '').strip()
-                if '亿' in mkt_cap:
-                    # 已是亿元单位
-                    mkt_cap = float(mkt_cap.replace('亿', ''))
-                else:
-                    # 视为元单位
-                    mkt_cap = float(mkt_cap) / 1e8
-            else:
-                # 数值型：akshare 默认返回元为单位
-                mkt_cap = float(mkt_cap) / 1e8
-
-            return mkt_cap >= Config.MIN_CIRCULATION_MKT_CAP
-        except Exception as e:
-            logger.error(f"检查流通市值异常: {e}")
-            return False
-
-    def _estimate_market_cap_from_daily(self, code):
-        """从日线数据反推流通市值（东财不可用时的降级方案）
-
-        两种计算方式（按可靠性优先）：
-        1. 流通股本 × 收盘价（最准确）
-           新浪 stock_zh_a_daily 返回 outstanding_share（流通股本，单位：股）
-           流通市值 = outstanding_share × close
-
-        2. 成交额 / 换手率（备用）
-           新浪 turnover: 小数形式（0.004673 = 0.4673%），不需除以100
-
-        参数:
-            code: 6位纯数字代码
-
-        返回:
-            流通市值（亿元），失败返回 0。
-        """
-        try:
-            df = self.fetch_daily_data(code, days=5)
-            if df is None or df.empty:
-                return 0
-
-            latest = df.iloc[-1]
-            close = float(latest.get('close', 0))
-
-            # 方式1：流通股本 × 收盘价（优先，最准确）
-            if 'outstanding_share' in df.columns:
-                outstanding = float(latest.get('outstanding_share', 0))
-                if outstanding > 0 and close > 0:
-                    circ_mv_yuan = outstanding * close
-                    return circ_mv_yuan / 1e8
-
-            # 方式2：成交额 / 换手率（备用）
-            if 'turnover' in df.columns:
-                amount = float(latest.get('amount', 0))
-                turn = float(latest.get('turnover', 0))
-                if amount > 0 and turn > 0:
-                    # 新浪接口 amount 单位可能是"元"或"万元"，需要判断
-                    # 正常成交额不会小于 1000（单位：元），如果小于 1000 可能是"万元"
-                    if amount < 1000 and close > 0:
-                        amount = amount * 10000
-
-                    circ_mv_yuan = amount / turn
-                    return circ_mv_yuan / 1e8
-
-            logger.debug(f"股票 {code} 无法反推流通市值，列名: {df.columns.tolist()}")
-            return 0
-        except Exception as e:
-            logger.debug(f"反推流通市值异常 {code}: {e}")
-            return 0
 
     def check_daily_trend(self, df, current_price=None):
         """检查日线多头排列
@@ -355,26 +231,6 @@ class StockFilter:
         except Exception as e:
             logger.error(f"检查周线趋势异常: {e}")
             return False, str(e)
-
-    def check_bias(self, df, current_price):
-        """检查乖离率"""
-        if df is None or len(df) < 5:
-            return False, "数据不足", 0
-
-        try:
-            ma5 = df.iloc[-1]['ma5']
-
-            if pd.isna(ma5) or ma5 == 0:
-                return False, "MA5数据无效", 0
-
-            bias = (current_price - ma5) / ma5 * 100
-
-            if Config.BIAS_LOWER_BOUND <= bias <= Config.BIAS_UPPER_BOUND:
-                return True, f"乖离率 {bias:.2f}%", bias
-            return False, f"乖离率 {bias:.2f}% 超出范围", bias
-        except Exception as e:
-            logger.error(f"检查乖离率异常: {e}")
-            return False, str(e), 0
 
     def check_zt_gene(self, df, code):
         """检查涨停基因"""
@@ -523,7 +379,6 @@ class StockFilter:
             'plate': stock_info.get('industry', stock_info.get('sector', '未知')),
             'current_price': stock_info.get('current_price', 0),
             'change_percent': stock_info.get('change_percent', 0),
-            'circulating_market_cap': stock_info.get('circulating_market_cap', 0),
             'passed': False,
             'reasons': [],
             'details': {}
@@ -549,35 +404,6 @@ class StockFilter:
         if not status_ok:
             result['reasons'].append(status_msg)
             return result
-
-        # 流通市值筛选
-        # 优先用东财实时市值；东财不可用（新浪降级模式）时用日线数据反推
-        mkt_cap = stock_info.get('circulating_market_cap', 0)
-        if mkt_cap and float(mkt_cap) != 0:
-            # 东财实时市值
-            if not self.check_market_cap(stock_info):
-                result['reasons'].append(f"流通市值不足 {Config.MIN_CIRCULATION_MKT_CAP} 亿")
-                return result
-        else:
-            # 新浪降级模式：从日线数据反推流通市值
-            estimated_mv = self._estimate_market_cap_from_daily(result['code'])
-            # 只有反推成功且结果合理时才进行筛选
-            # 反推失败（estimated_mv=0）或结果异常小时，跳过市值筛选
-            # 在新浪降级模式下，反推市值的可靠性较低，放宽筛选条件
-            if estimated_mv > 0:
-                if estimated_mv >= Config.MIN_CIRCULATION_MKT_CAP:
-                    # 反推市值足够大，保留
-                    result['details']['estimated_mv'] = round(estimated_mv, 2)
-                elif estimated_mv >= 50:
-                    # 反推市值在50-150亿之间，保留但标记为低可靠性
-                    result['details']['estimated_mv'] = round(estimated_mv, 2)
-                    logger.debug(f"股票 {result['code']} 反推市值 {estimated_mv:.1f}亿，低于阈值但保留")
-                else:
-                    # 反推市值太小或不可靠，跳过市值筛选（不淘汰）
-                    logger.debug(f"股票 {result['code']} 反推市值 {estimated_mv:.1f}亿，不可靠，跳过市值筛选")
-            else:
-                # 反推失败，跳过市值筛选
-                logger.debug(f"股票 {result['code']} 反推市值失败，跳过市值筛选")
 
         # 板块筛选（降级模式下 plate 为空，跳过板块筛选）
         if result['plate']:
@@ -615,15 +441,6 @@ class StockFilter:
             result['reasons'].append(weekly_trend_msg)
             return result
         result['details']['weekly_trend'] = weekly_trend_msg
-
-        bias_ok, bias_msg, bias_value = self.check_bias(daily_df, result['current_price'])
-        result['details']['bias'] = bias_value
-
-        # 乖离率为必须条件：超出范围直接淘汰（不再与突破做 OR）
-        # 原因：乖离率过大意味着短期涨幅过大、回调风险高，即使突破新高也不应介入
-        if not bias_ok:
-            result['reasons'].append(bias_msg)
-            return result
 
         # 突破作为加分项记录，但不作为筛选门槛
         breakout_ok, breakout_msg = self.check_breakout(daily_df, result['current_price'])

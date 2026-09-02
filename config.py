@@ -5,12 +5,7 @@ class Config:
     ANALYSIS_TIME = "10:00"
     PATCH_TIME_START = "09:45"
 
-    MIN_CIRCULATION_MKT_CAP = 80
-
     EARLY_VOLUME_RATIO_THRESHOLD = 0.35
-
-    BIAS_LOWER_BOUND = -2.0
-    BIAS_UPPER_BOUND = 8.0
 
     PLATE_TOP_PERCENTILE = 0.10
     PLATE_MIN_STOCKS_ABOVE_5PCT = 3
@@ -51,8 +46,6 @@ class Config:
     TARGET_DATE = None
 
     # ---- 分时条件阈值 ----
-    # 缩量回踩：回踩均量需低于上涨均量的多少比例
-    PULLBACK_VOLUME_RATIO = 0.8
     # 补丁1（9:45-10:00）：期间最低价不得低于9:45均价的比例
     PATCH1_MIN_PRICE_RATIO = 0.98
     # 补丁1：期间低于均价线的分钟数占比上限
@@ -78,8 +71,7 @@ class Config:
 
     # ---- 请求节流（防 IP 封禁）----
     # 同一数据源内两次请求的最小间隔（秒），不同数据源可并行
-    # 按数据源独立配置：东财风控严，新浪/同花顺中等
-    REQUEST_INTERVAL_EASTMONEY = 0.5   # 东财 push2 风控严格
+    # 按数据源独立配置
     REQUEST_INTERVAL_SINA = 0.3        # 新浪相对宽松
     REQUEST_INTERVAL_THS = 1.0         # 同花顺相对宽松
     REQUEST_INTERVAL_DEFAULT = 0.5     # 默认间隔
@@ -114,7 +106,6 @@ COLUMN_MAP_HIST = {
 COLUMN_MAP_SPOT = {
     '代码': 'code', '名称': 'name', '最新价': 'current_price',
     '涨跌幅': 'change_percent', '涨跌额': 'change_amount',
-    '流通市值': 'circulating_market_cap', '总市值': 'total_market_cap',
     '成交量': 'volume', '成交额': 'amount', '换手率': 'turnover',
 }
 

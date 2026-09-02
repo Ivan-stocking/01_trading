@@ -2,11 +2,9 @@ import akshare as ak
 import pandas as pd
 import numpy as np
 import logging
-import time
-import requests as _requests_module
 from datetime import datetime, timedelta
 from config import Config, rename_columns, COLUMN_MAP_MINUTE, COLUMN_MAP_HIST, code_to_symbol, get_end_date, get_target_date_str
-from data_source import throttle, is_eastmoney_available, _BROWSER_HEADERS
+from data_source import throttle
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +16,8 @@ class MinuteDataProcessor:
     def fetch_minute_data(self, code):
         """获取当日分时数据
 
-        主接口：东财 stock_zh_a_hist_min_em（push2his 端点，返回有效价格数据）
-        降级接口1：新浪 stock_zh_a_minute（今日价格可能为 NaN）
-        降级接口2：东财 trends2 直连 HTTP（绕过 akshare，直接请求 push2his）
-
-        注意：push2his.eastmoney.com 与 82.push2.eastmoney.com 是不同端点，
-        即使 is_eastmoney_available() 返回 False（82.push2 不可用），
-        push2his 仍可能可用，因此分时数据始终尝试东财。
+        数据源：新浪 stock_zh_a_minute（东财接口不稳定，已移除）。
+        新浪分时今日价格可能为 NaN，检测并尝试从 amount/volume 反推。
         """
         code = str(code)
         if code in self.minute_data_cache:
@@ -32,55 +25,33 @@ class MinuteDataProcessor:
 
         df = None
 
-        # 主接口：东财分时（push2his 端点），添加重试逻辑应对代理不稳定
-        for attempt in range(3):
-            try:
-                throttle('eastmoney')
-                df = ak.stock_zh_a_hist_min_em(symbol=code, period="1", adjust="qfq")
-                if df is not None and not df.empty:
-                    df = rename_columns(df, COLUMN_MAP_MINUTE)
-                    break
-            except Exception as e:
-                if attempt < 2:
-                    logger.warning(f"东财分时接口第{attempt+1}次失败，重试: {type(e).__name__}")
-                    time.sleep(0.5)
-                else:
-                    logger.warning(f"东财分时接口3次均失败，降级新浪: {type(e).__name__}")
-                df = None
-
-        # 降级接口1：新浪分时（symbol 需带交易所前缀）
-        if df is None or df.empty:
-            try:
-                symbol = code_to_symbol(code)
-                throttle('sina')
-                df = ak.stock_zh_a_minute(symbol=symbol, period="1", adjust="qfq")
-                if df is not None and not df.empty:
-                    df = rename_columns(df, COLUMN_MAP_MINUTE)
-                    # 新浪分时数据在盘中可能返回 NaN 价格（只有 volume/amount 有值）
-                    # 检测并尝试从 amount/volume 反推价格
-                    if 'close' in df.columns and df['close'].isna().all():
-                        logger.warning(f"股票 {code} 新浪分时价格全为 NaN，尝试东财直连")
-                        if 'amount' in df.columns and 'volume' in df.columns:
-                            # 反推价格 = 成交额 / 成交量
-                            vol = pd.to_numeric(df['volume'], errors='coerce')
-                            amt = pd.to_numeric(df['amount'], errors='coerce')
-                            inferred_price = amt / vol.replace(0, np.nan)
-                            if inferred_price.notna().any():
-                                df['close'] = inferred_price
-                                df['open'] = inferred_price
-                                df['high'] = inferred_price
-                                df['low'] = inferred_price
-                            else:
-                                df = None  # 无法反推，放弃新浪数据
+        try:
+            symbol = code_to_symbol(code)
+            throttle('sina')
+            df = ak.stock_zh_a_minute(symbol=symbol, period="1", adjust="qfq")
+            if df is not None and not df.empty:
+                df = rename_columns(df, COLUMN_MAP_MINUTE)
+                # 新浪分时数据在盘中可能返回 NaN 价格（只有 volume/amount 有值）
+                # 检测并尝试从 amount/volume 反推价格
+                if 'close' in df.columns and df['close'].isna().all():
+                    logger.warning(f"股票 {code} 新浪分时价格全为 NaN，尝试从量额反推")
+                    if 'amount' in df.columns and 'volume' in df.columns:
+                        # 反推价格 = 成交额 / 成交量
+                        vol = pd.to_numeric(df['volume'], errors='coerce')
+                        amt = pd.to_numeric(df['amount'], errors='coerce')
+                        inferred_price = amt / vol.replace(0, np.nan)
+                        if inferred_price.notna().any():
+                            df['close'] = inferred_price
+                            df['open'] = inferred_price
+                            df['high'] = inferred_price
+                            df['low'] = inferred_price
                         else:
-                            df = None
-            except Exception as e:
-                logger.error(f"获取股票 {code} 新浪分时数据异常: {e}")
-                df = None
-
-        # 降级接口2：东财 trends2 直连 HTTP（绕过 akshare，直接请求 push2his）
-        if df is None or df.empty:
-            df = self._fetch_minute_direct_http(code)
+                            df = None  # 无法反推，放弃
+                    else:
+                        df = None
+        except Exception as e:
+            logger.error(f"获取股票 {code} 新浪分时数据异常: {e}")
+            df = None
 
         if df is None or df.empty:
             logger.warning(f"获取股票 {code} 分时数据失败（所有接口均未返回数据）")
@@ -109,66 +80,6 @@ class MinuteDataProcessor:
 
         self.minute_data_cache[code] = df
         return df
-
-    def _fetch_minute_direct_http(self, code):
-        """东财 trends2 直连 HTTP 降级方案
-
-        直接请求 push2his.eastmoney.com 的 trends2 接口，
-        绕过 akshare 封装，减少中间层开销。
-        push2his 与 82.push2 是不同端点，代理环境下可能一个可用一个不可用。
-        """
-        code = str(code).zfill(6)
-        # 确定市场前缀：0=深市，1=沪市
-        if code.startswith('6'):
-            secid = f"1.{code}"
-        else:
-            secid = f"0.{code}"
-
-        try:
-            throttle('eastmoney')
-            url = 'https://push2his.eastmoney.com/api/qt/stock/trends2/get'
-            params = {
-                'fields1': 'f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13',
-                'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58',
-                'ut': '7eea3edcaed734bea9cbfc24409ed989',
-                'ndays': 5,
-                'iscr': 0,
-                'secid': secid,
-            }
-            resp = _requests_module.get(url, params=params, headers=_BROWSER_HEADERS, timeout=10)
-            if resp.status_code != 200:
-                logger.warning(f"股票 {code} 东财直连HTTP返回 {resp.status_code}")
-                return None
-
-            data = resp.json().get('data')
-            if not data or not data.get('klines'):
-                logger.warning(f"股票 {code} 东财直连HTTP无klines数据")
-                return None
-
-            klines = data['klines']
-            rows = []
-            for line in klines:
-                parts = line.split(',')
-                if len(parts) >= 8:
-                    rows.append({
-                        'time': parts[0],
-                        'open': float(parts[1]),
-                        'close': float(parts[2]),
-                        'high': float(parts[3]),
-                        'low': float(parts[4]),
-                        'volume': float(parts[5]),
-                        'amount': float(parts[6]),
-                    })
-
-            if not rows:
-                return None
-
-            df = pd.DataFrame(rows)
-            logger.info(f"股票 {code} 东财直连HTTP成功，获取 {len(df)} 条分时数据")
-            return df
-        except Exception as e:
-            logger.warning(f"股票 {code} 东财直连HTTP失败: {type(e).__name__}: {e}")
-            return None
 
     def fetch_yesterday_volume(self, code, daily_df=None):
         """获取昨日全天成交量
@@ -205,7 +116,7 @@ class MinuteDataProcessor:
             except Exception:
                 pass
 
-        # 降级：独立请求日线数据（优先东财，失败用新浪）
+        # 降级：独立请求日线数据（新浪接口）
         try:
             # 回测模式用 TARGET_DATE，实盘用今日
             if Config.TARGET_DATE:
@@ -215,31 +126,18 @@ class MinuteDataProcessor:
                 end_date = datetime.now().strftime('%Y%m%d')
                 start_date = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
 
-            # 优先东财接口（纯数字代码）；东财不可用直接走新浪
             df = None
-            if is_eastmoney_available():
-                try:
-                    throttle('eastmoney')
-                    df = ak.stock_zh_a_hist(
-                        symbol=str(code),
-                        period="daily",
-                        start_date=start_date,
-                        end_date=end_date,
-                        adjust="qfq"
-                    )
-                except Exception:
-                    pass
-
-            # 东财失败或不可用，降级新浪接口（需带前缀）
-            if df is None or df.empty:
-                symbol = code_to_symbol(code)
+            try:
                 throttle('sina')
+                symbol = code_to_symbol(code)
                 df = ak.stock_zh_a_daily(
                     symbol=symbol,
                     start_date=start_date,
                     end_date=end_date,
                     adjust="qfq"
                 )
+            except Exception:
+                pass
 
             if df is not None and len(df) >= 2:
                 df = rename_columns(df, COLUMN_MAP_HIST)
@@ -384,49 +282,6 @@ class MinuteDataProcessor:
             logger.error(f"检查股价与均价线关系异常: {e}")
             return False, str(e)
 
-    def check_volume_on_pullback(self, df):
-        """检查回踩时是否缩量"""
-        if df is None or df.empty:
-            return False, "分时数据为空"
-
-        try:
-            df_with_avg = self.calculate_avg_price_line(df)
-
-            if df_with_avg is None:
-                return False, "无法计算均价线"
-
-            trading_data = self.filter_trading_minutes(df_with_avg, Config.MARKET_START_TIME, Config.ANALYSIS_TIME)
-
-            if trading_data is None or len(trading_data) < 10:
-                return False, "交易数据不足"
-
-            pullback_periods = []
-            rally_periods = []
-
-            for i in range(1, len(trading_data)):
-                prev_close = trading_data.iloc[i-1]['close']
-                curr_close = trading_data.iloc[i]['close']
-                curr_avg = trading_data.iloc[i]['avg_price']
-                volume = trading_data.iloc[i]['volume']
-
-                if curr_close < prev_close and curr_close <= curr_avg:
-                    pullback_periods.append(volume)
-                elif curr_close > prev_close:
-                    rally_periods.append(volume)
-
-            if len(pullback_periods) == 0 or len(rally_periods) == 0:
-                return True, "无明显回踩或上涨阶段"
-
-            avg_pullback_volume = np.mean(pullback_periods)
-            avg_rally_volume = np.mean(rally_periods)
-
-            if avg_pullback_volume < avg_rally_volume * Config.PULLBACK_VOLUME_RATIO:
-                return True, f"缩量回踩: 回踩均量 {avg_pullback_volume:.0f} < 上涨均量 {avg_rally_volume:.0f} * {Config.PULLBACK_VOLUME_RATIO}"
-            return False, f"放量回踩: 回踩均量 {avg_pullback_volume:.0f} >= 上涨均量 {avg_rally_volume:.0f} * {Config.PULLBACK_VOLUME_RATIO}"
-        except Exception as e:
-            logger.error(f"检查回踩量能异常: {e}")
-            return False, str(e)
-
     def check_patch_1(self, df):
         """补丁1：检查9:45-10:00之间是否始终在均价线上"""
         if df is None or df.empty:
@@ -495,19 +350,13 @@ class MinuteDataProcessor:
         if not price_above_avg_ok:
             result['reasons'].append(price_above_avg_msg)
 
-        pullback_ok, pullback_msg = self.check_volume_on_pullback(minute_df)
-        result['details']['pullback'] = pullback_msg
-
-        if not pullback_ok:
-            result['reasons'].append(pullback_msg)
-
         patch1_ok, patch1_msg = self.check_patch_1(minute_df)
         result['details']['patch1'] = patch1_msg
 
         if not patch1_ok:
             result['reasons'].append(patch1_msg)
 
-        if early_volume_ok and price_above_avg_ok and pullback_ok and patch1_ok:
+        if early_volume_ok and price_above_avg_ok and patch1_ok:
             result['passed'] = True
 
         return result
