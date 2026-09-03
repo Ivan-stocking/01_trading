@@ -25,9 +25,6 @@ class Config:
 
     MAX_PLATE_RANK = 50                  # 行业板块排名上限（取前50个申万二级行业）
 
-    LONG_SHADOW_WINDOW = 3
-    LONG_SHADOW_RATIO = 2.0
-
     NEW_STOCK_DAYS = 60
 
     MIN_VOLUME_FOR_ANALYSIS = 10000

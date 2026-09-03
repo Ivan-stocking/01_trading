@@ -281,38 +281,6 @@ class StockFilter:
             return True, f"超额收益 {excess_return:.2f}%"
         return False, f"超额收益 {excess_return:.2f}%"
 
-    def check_long_shadow(self, df):
-        """检查长上影线"""
-        if df is None or len(df) < Config.LONG_SHADOW_WINDOW:
-            return True, "数据不足"
-
-        try:
-            recent = df.tail(Config.LONG_SHADOW_WINDOW)
-
-            for i in range(len(recent) - 1):
-                row = recent.iloc[i]
-                high = row['high']
-                low = row['low']
-                close = row['close']
-                open_ = row['open']
-
-                body = abs(close - open_)
-                upper_shadow = high - max(open_, close)
-
-                if body == 0:
-                    body = 0.0001
-
-                if upper_shadow / body > Config.LONG_SHADOW_RATIO:
-                    next_row = recent.iloc[i + 1] if i + 1 < len(recent) else None
-
-                    if next_row is not None and next_row['close'] < high:
-                        return False, f"近{Config.LONG_SHADOW_WINDOW}日存在长上影线且未突破"
-
-            return True, "无长上影线问题"
-        except Exception as e:
-            logger.error(f"检查长上影线异常: {e}")
-            return True, str(e)
-
     def check_is_st(self, name):
         """检查是否为ST股"""
         if name is None:
@@ -459,11 +427,6 @@ class StockFilter:
             return result
         result['details']['relative_strength'] = rs_msg
         result['details']['excess_return'] = result['change_percent'] - self.all_a_index_change
-
-        shadow_ok, shadow_msg = self.check_long_shadow(daily_df)
-        if not shadow_ok:
-            result['reasons'].append(shadow_msg)
-            return result
 
         plate_info = self.plate_analyzer.get_plate_info(result['plate'])
         result['details']['plate_rank'] = plate_info.get('rank', 999)

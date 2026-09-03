@@ -71,7 +71,7 @@
 
 ### stock_filter.py — `StockFilter`
 - 依赖 `PlateAnalyzer` 实例。
-- 执行个股多级筛选：ST/停牌/市值/板块资格/板块地位 → 日线趋势 → 周线趋势 → 乖离率/突破 → 涨停基因 → 相对强度 → 长上影线。
+- 执行个股多级筛选：ST/停牌/市值/板块资格/板块地位 → 日线趋势 → 周线趋势 → 乖离率/突破 → 涨停基因 → 相对强度。
 - 计算 `ranking_score` 综合排名分数。
 - `generate_comment()` 根据板块助攻情况生成仓位建议，阈值由 `Config.POSITION_PLATE_*` 控制（重仓/正常仓位/轻仓试错）。**仍调用 `is_concept_active()` 调整仓位**，但因 `fetch_concept_rankings()` 已不执行，`concept_avg_change` 恒为 0，概念热度恒判为"冷清"（"重仓"降级为"正常仓位"，备注附带"概念热点冷清(均值0.0%)"）。
 - 日线数据有缓存（`stock_data_cache`），周线数据有缓存（`weekly_data_cache`），避免重复请求。
