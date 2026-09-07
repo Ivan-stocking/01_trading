@@ -323,14 +323,6 @@ class StockFilter:
             logger.error(f"检查股票状态异常: {e}")
             return False, str(e)
 
-    def check_plate_position(self, stock_change, plate_name):
-        """检查个股在板块中的地位（涨幅是否大于板块均值）"""
-        plate_avg = self.plate_analyzer.get_plate_avg_change(plate_name)
-
-        if stock_change > plate_avg:
-            return True, f"板块均值 {plate_avg:.2f}%, 个股涨幅 {stock_change:.2f}%"
-        return False, f"板块均值 {plate_avg:.2f}%, 个股涨幅 {stock_change:.2f}%"
-
     def calculate_ranking_score(self, stock_change, plate_rank, excess_return):
         """计算综合排名分数"""
         plate_score = max(0, 100 - plate_rank * 3)
@@ -378,12 +370,6 @@ class StockFilter:
             plate_ok, plate_msg = self.plate_analyzer.is_plate_qualified(result['plate'])
             if not plate_ok:
                 result['reasons'].append(plate_msg)
-                return result
-
-            plate_position_ok, plate_position_msg = self.check_plate_position(
-                result['change_percent'], result['plate'])
-            if not plate_position_ok:
-                result['reasons'].append(plate_position_msg)
                 return result
         else:
             result['details']['plate_rank'] = 1  # 降级模式占位

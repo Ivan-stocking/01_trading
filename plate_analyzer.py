@@ -294,18 +294,11 @@ class PlateAnalyzer:
 
         return True, "符合条件"
 
-    def get_plate_avg_change(self, plate_name):
-        """获取板块平均涨幅（基于成分股）"""
-        stats = self.plate_stats.get(plate_name)
-        return stats['avg_change'] if stats else 0
-
     def get_plate_change_percent(self, plate_name):
         """获取板块本身的涨幅（板块指数涨幅，来自 plate_rankings）
 
-        用于结果展示：显示个股所属板块当日的涨跌幅。
-        与 get_plate_avg_change 的区别：
-          - get_plate_avg_change：板块内成分股的平均涨幅
-          - get_plate_change_percent：板块指数本身的涨幅（更准确反映板块强度）
+        用于结果展示：显示个股所属板块当日的涨跌幅，
+        反映板块指数本身的强度。
         """
         if not plate_name or self.plate_rankings is None:
             return 0.0
