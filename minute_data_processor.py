@@ -31,24 +31,6 @@ class MinuteDataProcessor:
             df = ak.stock_zh_a_minute(symbol=symbol, period="1", adjust="qfq")
             if df is not None and not df.empty:
                 df = rename_columns(df, COLUMN_MAP_MINUTE)
-                # 新浪分时数据在盘中可能返回 NaN 价格（只有 volume/amount 有值）
-                # 检测并尝试从 amount/volume 反推价格
-                if 'close' in df.columns and df['close'].isna().all():
-                    logger.warning(f"股票 {code} 新浪分时价格全为 NaN，尝试从量额反推")
-                    if 'amount' in df.columns and 'volume' in df.columns:
-                        # 反推价格 = 成交额 / 成交量
-                        vol = pd.to_numeric(df['volume'], errors='coerce')
-                        amt = pd.to_numeric(df['amount'], errors='coerce')
-                        inferred_price = amt / vol.replace(0, np.nan)
-                        if inferred_price.notna().any():
-                            df['close'] = inferred_price
-                            df['open'] = inferred_price
-                            df['high'] = inferred_price
-                            df['low'] = inferred_price
-                        else:
-                            df = None  # 无法反推，放弃
-                    else:
-                        df = None
         except Exception as e:
             logger.error(f"获取股票 {code} 新浪分时数据异常: {e}")
             df = None
@@ -57,7 +39,7 @@ class MinuteDataProcessor:
             logger.warning(f"获取股票 {code} 分时数据失败（所有接口均未返回数据）")
             return None
 
-        # 以下为原有逻辑：日期过滤、类型转换、缓存
+        # 先日期过滤到今日数据
         target_date_str = get_target_date_str()
         df = df.copy()
         df['_date_part'] = df['time'].astype(str).str[:10]
@@ -71,10 +53,34 @@ class MinuteDataProcessor:
         df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
         df['close'] = pd.to_numeric(df['close'], errors='coerce')
 
-        if 'amount' not in df.columns or df['amount'].isna().all():
-            df['amount'] = df['close'] * df['volume']
+        # 新浪分时数据在盘中可能返回 NaN 价格（只有 volume/amount 有值）
+        # 这里必须针对【日期过滤后的今日数据】做检测：全量数据含历史 close，
+        # 若对全量判断会被历史行的非 NaN close 掩盖，导致反推逻辑被跳过（bug fix）
+        if 'close' in df.columns and df['close'].isna().all():
+            logger.warning(f"股票 {code} 今日分时价格全为 NaN，尝试从量额反推")
+            if 'amount' in df.columns and 'volume' in df.columns:
+                vol = pd.to_numeric(df['volume'], errors='coerce')
+                amt = pd.to_numeric(df['amount'], errors='coerce')
+                inferred_price = amt / vol.replace(0, np.nan)
+                if inferred_price.notna().any():
+                    df['close'] = inferred_price
+                    df['open'] = inferred_price
+                    df['high'] = inferred_price
+                    df['low'] = inferred_price
+                    # 反推后用 close * volume 重算 amount 保持一致
+                    df['amount'] = df['close'] * df['volume']
+                else:
+                    logger.warning(f"股票 {code} 反推价格无有效值，放弃")
+                    return None
+            else:
+                logger.warning(f"股票 {code} 缺 amount/volume 列，无法反推")
+                return None
         else:
-            df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+            # 正常情况：close 有值
+            if 'amount' not in df.columns or df['amount'].isna().all():
+                df['amount'] = df['close'] * df['volume']
+            else:
+                df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
 
         df = df.dropna(subset=['time', 'close', 'volume'])
 
