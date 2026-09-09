@@ -53,9 +53,6 @@ class Config:
     POSITION_PLATE_ABOVE_5PCT_NORMAL = 5   # 板块涨幅≥5%家数≥此值 → 正常仓位
     POSITION_PLATE_ABOVE_5PCT_LIGHT = 3    # 板块涨幅≥5%家数≥此值 → 轻仓试错
 
-    # ---- 结果输出 ----
-    TOP_STOCK_MAX = 5                      # 最终输出个股数量上限
-
     # ---- 板块成分股并发获取 ----
     PLATE_CONS_MAX_WORKERS = 10            # 线程池并发数（同花顺概念涨幅获取）
     STOCK_FILTER_MAX_WORKERS = 20           # 个股筛选线程池并发数

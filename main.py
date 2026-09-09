@@ -15,9 +15,6 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# 输出个股数量上限（统一从 Config 读取，便于集中调整）
-TOP_STOCK_MAX = Config.TOP_STOCK_MAX
-
 # 降级模式下遍历的涨幅前N只股票数量（板块成分股接口不可用时使用）
 DEGRADED_SCAN_COUNT = 100
 
@@ -242,7 +239,7 @@ def run_filter():
         1. 板块分析（排名、梯队、全A指数、成分股映射、概念涨幅）
         2. 并发遍历股票，逐只执行日线/周线/基因等筛选
         3. 对通过初筛的个股执行分时量价确认
-        4. 按综合评分降序，分别输出"板块维度"和"概念维度"前 3-5 只
+        4. 按综合评分降序，全量输出通过筛选的股票
     """
     logger.info("=" * 60)
     logger.info("开始执行A股开盘30分钟强势股筛选程序")
@@ -320,8 +317,8 @@ def run_filter():
         # 按综合评分降序排序
         passed_stocks.sort(key=lambda x: x['details'].get('ranking_score', 0), reverse=True)
 
-        # 行业板块维度：取前 TOP_STOCK_MAX 只
-        plate_stocks = _select_plate_stocks(passed_stocks, plate_analyzer)
+        # 行业板块维度：全量输出（不截断）
+        plate_stocks = _select_plate_stocks(passed_stocks)
 
         print_results(plate_stocks, all_a_index_change, plate_analyzer)
 
@@ -332,34 +329,23 @@ def run_filter():
         return []
 
 
-def _select_plate_stocks(passed_stocks, plate_analyzer):
-    """选择前 TOP_STOCK_MAX 只行业板块维度的股票
+def _select_plate_stocks(passed_stocks):
+    """选择全部通过筛选的行业板块维度股票（全量输出，不截断）
 
     参数:
         passed_stocks: 通过筛选的股票列表（已按 ranking_score 降序）
-        plate_analyzer: 板块分析器
 
-    返回: 前 TOP_STOCK_MAX 只股票列表，每只额外填充展示字段：
+    返回: 股票列表，每只额外填充展示字段：
         - dimension_name: 所属板块名称
-        - dimension_change: 板块当前涨跌幅
-        - last_zt_date: 最近涨停日期
     """
-    def _fill_display_fields(stock, dim_name, dim_change):
-        s = dict(stock)
-        s['dimension_name'] = dim_name or '-'
-        s['dimension_change'] = dim_change
-        details = s.get('details', {}) or {}
-        zt_dates = details.get('zt_dates', []) or []
-        s['last_zt_date'] = zt_dates[0]['date'] if zt_dates else '-'
-        return s
-
     selected = []
     for s in passed_stocks:
         plate_name = s.get('plate', '')
         if plate_name:
-            plate_change = plate_analyzer.get_plate_change_percent(plate_name)
-            selected.append(_fill_display_fields(s, plate_name, plate_change))
-    return selected[:TOP_STOCK_MAX]
+            stock = dict(s)
+            stock['dimension_name'] = plate_name
+            selected.append(stock)
+    return selected
 
 
 def print_results(plate_stocks, all_a_index_change, plate_analyzer):
@@ -399,12 +385,12 @@ def print_results(plate_stocks, all_a_index_change, plate_analyzer):
 
 
 def _print_stock_table(stocks, dimension_label='板块'):
-    """打印股票表格
+    """打印股票表格（全量显示）
 
-    列：排名 | 股票名称 | 代码 | 当前涨跌幅 | 所属{板块/概念} | {板块/概念}涨跌幅 | 最近涨停日 | 仓位建议
+    列：排名 | 股票 | 代码 | 涨幅 | 板块 | 综合评分 | 备注
 
     参数:
-        stocks: 股票列表（已通过 _select_by_dimension 填充展示字段）
+        stocks: 股票列表（已通过 _select_plate_stocks 填充展示字段）
         dimension_label: '板块' 或 '概念'，用于列头显示
 
     说明：中文字符在 Python 格式化中按 1 个字符计宽，但显示宽度为 2，
@@ -412,46 +398,38 @@ def _print_stock_table(stocks, dimension_label='板块'):
     """
     # 列头（中文按 2 倍宽度估算列宽）
     header = (f"{'排名':<6}"
-              f"{'股票名称':<14}"
+              f"{'股票':<14}"
               f"{'代码':<10}"
-              f"{'当前涨跌幅':<12}"
-              f"{'所属' + dimension_label:<18}"
-              f"{dimension_label + '涨跌幅':<14}"
-              f"{'最近涨停日':<14}"
-              f"{'仓位建议'}")
+              f"{'涨幅':<10}"
+              f"{dimension_label:<18}"
+              f"{'综合评分':<10}"
+              f"{'备注'}")
     print(header)
-    print("-" * 130)
+    print("-" * 110)
 
     for i, stock in enumerate(stocks, 1):
-        # 当前涨跌幅
+        # 涨幅
         change = stock.get('change_percent', 0)
         change_str = f"{change:+.2f}%"
 
         # 所属板块/概念名称（截断到 8 个中文字符宽度）
         dim_name = str(stock.get('dimension_name', '-') or '-')
-        if dim_name != '-':
-            # 截断长名称（按字符数，8 个中文字符约等于 16 显示宽度）
-            dim_name_display = dim_name[:8]
-        else:
-            dim_name_display = '-'
+        dim_name_display = dim_name[:8] if dim_name != '-' else '-'
 
-        # 板块/概念涨跌幅
-        dim_change = stock.get('dimension_change', 0) or 0
-        dim_change_str = f"{dim_change:+.2f}%"
+        # 综合评分
+        details = stock.get('details', {}) or {}
+        score = details.get('ranking_score', 0) or 0
+        score_str = f"{score:.1f}"
 
-        # 最近涨停日
-        last_zt = str(stock.get('last_zt_date', '-') or '-')
-
-        # 仓位建议
+        # 备注（仓位建议等）
         comment = stock.get('comment', '') or ''
 
         line = (f"{str(i):<6}"
                 f"{str(stock.get('name', '')):<14}"
                 f"{str(stock.get('code', '')):<10}"
-                f"{change_str:<12}"
+                f"{change_str:<10}"
                 f"{dim_name_display:<18}"
-                f"{dim_change_str:<14}"
-                f"{last_zt:<14}"
+                f"{score_str:<10}"
                 f"{comment}")
         print(line)
 
