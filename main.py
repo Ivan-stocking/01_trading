@@ -318,7 +318,7 @@ def run_filter():
         passed_stocks.sort(key=lambda x: x['details'].get('ranking_score', 0), reverse=True)
 
         # 行业板块维度：全量输出（不截断）
-        plate_stocks = _select_plate_stocks(passed_stocks)
+        plate_stocks = _select_plate_stocks(passed_stocks, plate_analyzer)
 
         print_results(plate_stocks, all_a_index_change, plate_analyzer)
 
@@ -329,14 +329,16 @@ def run_filter():
         return []
 
 
-def _select_plate_stocks(passed_stocks):
+def _select_plate_stocks(passed_stocks, plate_analyzer):
     """选择全部通过筛选的行业板块维度股票（全量输出，不截断）
 
     参数:
         passed_stocks: 通过筛选的股票列表（已按 ranking_score 降序）
+        plate_analyzer: 板块分析器（用于获取板块涨幅）
 
     返回: 股票列表，每只额外填充展示字段：
         - dimension_name: 所属板块名称
+        - dimension_change: 板块当日涨跌幅
         - last_zt_date: 最近涨停日期
     """
     selected = []
@@ -345,6 +347,7 @@ def _select_plate_stocks(passed_stocks):
         if plate_name:
             stock = dict(s)
             stock['dimension_name'] = plate_name
+            stock['dimension_change'] = plate_analyzer.get_plate_change_percent(plate_name)
             details = s.get('details', {}) or {}
             zt_dates = details.get('zt_dates', []) or []
             stock['last_zt_date'] = zt_dates[0]['date'] if zt_dates else '-'
@@ -391,7 +394,7 @@ def print_results(plate_stocks, all_a_index_change, plate_analyzer):
 def _print_stock_table(stocks, dimension_label='板块'):
     """打印股票表格（全量显示）
 
-    列：排名 | 股票 | 代码 | 涨幅 | 最近涨停日 | 板块 | 综合评分 | 备注
+    列：排名 | 股票 | 代码 | 涨幅 | 最近涨停日 | 板块 | 板块涨幅 | 综合评分 | 备注
 
     参数:
         stocks: 股票列表（已通过 _select_plate_stocks 填充展示字段）
@@ -407,10 +410,11 @@ def _print_stock_table(stocks, dimension_label='板块'):
               f"{'涨幅':<10}"
               f"{'最近涨停日':<14}"
               f"{dimension_label:<18}"
+              f"{dimension_label + '涨幅':<12}"
               f"{'综合评分':<10}"
               f"{'备注'}")
     print(header)
-    print("-" * 120)
+    print("-" * 140)
 
     for i, stock in enumerate(stocks, 1):
         # 涨幅
@@ -423,6 +427,10 @@ def _print_stock_table(stocks, dimension_label='板块'):
         # 所属板块/概念名称（截断到 8 个中文字符宽度）
         dim_name = str(stock.get('dimension_name', '-') or '-')
         dim_name_display = dim_name[:8] if dim_name != '-' else '-'
+
+        # 板块/概念涨幅
+        dim_change = stock.get('dimension_change', 0) or 0
+        dim_change_str = f"{dim_change:+.2f}%"
 
         # 综合评分
         details = stock.get('details', {}) or {}
@@ -438,6 +446,7 @@ def _print_stock_table(stocks, dimension_label='板块'):
                 f"{change_str:<10}"
                 f"{last_zt:<14}"
                 f"{dim_name_display:<18}"
+                f"{dim_change_str:<12}"
                 f"{score_str:<10}"
                 f"{comment}")
         print(line)

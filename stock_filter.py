@@ -240,16 +240,25 @@ class StockFilter:
         try:
             zt_threshold = self.get_zt_threshold(code)
 
+            # df 已按 date 升序排列，tail 取最近 N 个交易日
             recent = df.tail(Config.ZT_WINDOW_DAYS)
             zt_dates = []
 
             for _, row in recent.iterrows():
                 pct_change = row.get('change_percent', 0)
                 if pd.notna(pct_change) and pct_change >= zt_threshold:
+                    dt = row['date']
+                    if isinstance(dt, (pd.Timestamp, datetime)):
+                        date_str = dt.strftime('%Y-%m-%d')
+                    else:
+                        date_str = str(dt)[:10]
                     zt_dates.append({
-                        'date': str(row['date'])[:10],
+                        'date': date_str,
                         'change': float(pct_change)
                     })
+
+            # 迭代顺序为窗口内从旧到新，反转后最新涨停排在首位
+            zt_dates = list(reversed(zt_dates))
 
             if len(zt_dates) >= 1:
                 return True, f"近{Config.ZT_WINDOW_DAYS}日涨停{len(zt_dates)}次", zt_dates
