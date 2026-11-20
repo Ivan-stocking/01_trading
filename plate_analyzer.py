@@ -4,7 +4,7 @@ import numpy as np
 import logging
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from config import Config, rename_columns, COLUMN_MAP_SPOT, COLUMN_MAP_SW, symbol_to_code, get_end_date
+from config import Config, rename_columns, COLUMN_MAP_SPOT, COLUMN_MAP_SW, COLUMN_MAP_EM_PLATE, symbol_to_code, get_end_date
 from data_source import throttle
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,7 @@ class PlateAnalyzer:
         self.all_a_stocks = None
         self.stock_plate_map = {}  # code → plate_name 映射
         self.degraded_mode = False  # 降级模式（东财不可用时为True）
+        self._plate_source = 'sw'   # 板块数据源标记：'sw'（申万）或 'em'（东财降级）
 
         # 概念板块相关
         self.concept_rankings = None      # 概念板块涨幅排名 DataFrame
@@ -30,32 +31,58 @@ class PlateAnalyzer:
         self.concept_avg_change = 0.0     # 热点概念平均涨幅
 
     def fetch_plate_data(self):
-        """获取申万二级行业数据
+        """获取行业板块涨幅数据
 
-        使用 ak.index_realtime_sw(symbol='二级行业') 获取124个申万二级行业实时行情，
-        通过 (最新价 - 昨收盘) / 昨收盘 * 100 计算涨跌幅。
+        优先使用申万二级行业指数接口（ak.index_realtime_sw）；
+        若申万接口返回空/异常（如 swsresearch.com 在部分网络环境下不可用），
+        降级使用东方财富行业板块接口（ak.stock_board_industry_name_em）。
+
+        东财行业板块（496 个）比申万二级（124 个）粒度更细，
+        但同样能反映板块实时涨幅排名，不影响后续筛选逻辑。
         """
+        # ---- 方案 A：申万二级行业 ----
         try:
             logger.info("正在获取申万二级行业数据...")
 
             throttle('default')
             sw_df = ak.index_realtime_sw(symbol='二级行业')
             if sw_df is None or sw_df.empty:
-                logger.error("申万二级行业数据获取失败")
+                logger.warning("申万二级行业数据为空，降级使用东方财富行业板块")
+            else:
+                sw_df = rename_columns(sw_df, COLUMN_MAP_SW)
+                # 计算涨跌幅 = (最新价 - 昨收盘) / 昨收盘 * 100
+                sw_df['change_percent'] = (
+                    pd.to_numeric(sw_df['current_price'], errors='coerce') -
+                    pd.to_numeric(sw_df['pre_close'], errors='coerce')
+                ) / pd.to_numeric(sw_df['pre_close'], errors='coerce') * 100
+
+                self.plate_data = sw_df
+                logger.info(f"申万二级行业获取成功，共 {len(sw_df)} 个行业")
+                return True
+        except Exception as e:
+            logger.warning(f"获取申万二级行业数据异常，降级使用东方财富: {e}")
+
+        # ---- 方案 B：东方财富行业板块（降级） ----
+        try:
+            logger.info("正在获取东方财富行业板块数据（降级方案）...")
+
+            throttle('eastmoney')
+            em_df = ak.stock_board_industry_name_em()
+            if em_df is None or em_df.empty:
+                logger.error("东方财富行业板块数据也为空，板块分析无法继续")
                 return False
 
-            sw_df = rename_columns(sw_df, COLUMN_MAP_SW)
-            # 计算涨跌幅 = (最新价 - 昨收盘) / 昨收盘 * 100
-            sw_df['change_percent'] = (
-                pd.to_numeric(sw_df['current_price'], errors='coerce') -
-                pd.to_numeric(sw_df['pre_close'], errors='coerce')
-            ) / pd.to_numeric(sw_df['pre_close'], errors='coerce') * 100
+            # 重命名 + 类型转换
+            em_df = rename_columns(em_df, COLUMN_MAP_EM_PLATE)
+            em_df['change_percent'] = pd.to_numeric(em_df['change_percent'], errors='coerce')
+            em_df = em_df.dropna(subset=['change_percent'])
 
-            self.plate_data = sw_df
-            logger.info(f"申万二级行业获取成功，共 {len(sw_df)} 个行业")
+            self.plate_data = em_df
+            self._plate_source = 'em'  # 标记数据源，成分股阶段按需切换
+            logger.info(f"东方财富行业板块获取成功，共 {len(em_df)} 个板块（降级模式）")
             return True
         except Exception as e:
-            logger.error(f"获取申万二级行业数据异常: {e}")
+            logger.error(f"东方财富行业板块获取也失败: {e}")
             return False
 
     def fetch_all_a_stocks(self):
@@ -172,8 +199,10 @@ class PlateAnalyzer:
     def fetch_plate_constituents(self):
         """获取排名靠前板块的成分股，建立 code→plate 映射
 
-        使用 ak.index_component_sw(symbol=index_code) 获取申万二级行业成分股。
-        申万接口稳定，无需东财预检。
+        根据 self._plate_source 选择数据源：
+          - 'sw'：ak.index_component_sw(symbol=申万指数代码)
+          - 'em'：ak.stock_board_industry_cons_em(symbol=东财板块名称)
+        若成分股接口全部失败，进入全局降级模式（遍历涨幅前N只股票）。
         """
         if self.plate_rankings is None:
             logger.error("板块排名数据为空")
@@ -184,31 +213,55 @@ class PlateAnalyzer:
             top_plates = self.plate_rankings[
                 self.plate_rankings['rank'] <= Config.MAX_PLATE_RANK
             ]
-
-            # 申万成分股接口用指数代码（如 '801081'），不是板块名称
             plates_to_fetch = top_plates[['code', 'name']].values.tolist()
-            logger.info(f"开始获取 {len(plates_to_fetch)} 个申万二级行业的成分股"
-                        f"（并发数 {Config.PLATE_CONS_MAX_WORKERS}）...")
 
-            def _fetch_one(plate_code, plate_name):
-                """单个行业成分股获取（线程内执行）"""
-                try:
-                    throttle('default')
-                    cons_df = ak.index_component_sw(symbol=str(plate_code))
-                    if cons_df is None or cons_df.empty:
+            if self._plate_source == 'em':
+                # ---- 东财行业板块成分股 ----
+                logger.info(f"开始获取 {len(plates_to_fetch)} 个东财行业板块的成分股"
+                            f"（并发数 {Config.PLATE_CONS_MAX_WORKERS}）...")
+
+                def _fetch_one_em(plate_code, plate_name):
+                    """东财成分股获取（用板块名称作为 symbol）"""
+                    try:
+                        throttle('eastmoney')
+                        cons_df = ak.stock_board_industry_cons_em(symbol=str(plate_name))
+                        if cons_df is None or cons_df.empty:
+                            return plate_name, []
+                        codes = []
+                        for code in cons_df['代码']:
+                            code = str(code).strip().zfill(6)
+                            codes.append(code)
+                        return plate_name, codes
+                    except Exception as e:
+                        logger.warning(f"获取东财板块 '{plate_name}' 成分股失败: {e}")
                         return plate_name, []
-                    codes = []
-                    for code in cons_df['证券代码']:
-                        # 规范化代码：补齐6位数字
-                        code = str(code).strip().zfill(6)
-                        codes.append(code)
-                    return plate_name, codes
-                except Exception as e:
-                    logger.warning(f"获取行业 '{plate_name}' 成分股失败: {e}")
-                    return plate_name, []
+
+                fetch_fn = _fetch_one_em
+            else:
+                # ---- 申万成分股（原始逻辑） ----
+                logger.info(f"开始获取 {len(plates_to_fetch)} 个申万二级行业的成分股"
+                            f"（并发数 {Config.PLATE_CONS_MAX_WORKERS}）...")
+
+                def _fetch_one_sw(plate_code, plate_name):
+                    """申万成分股获取（用指数代码）"""
+                    try:
+                        throttle('default')
+                        cons_df = ak.index_component_sw(symbol=str(plate_code))
+                        if cons_df is None or cons_df.empty:
+                            return plate_name, []
+                        codes = []
+                        for code in cons_df['证券代码']:
+                            code = str(code).strip().zfill(6)
+                            codes.append(code)
+                        return plate_name, codes
+                    except Exception as e:
+                        logger.warning(f"获取行业 '{plate_name}' 成分股失败: {e}")
+                        return plate_name, []
+
+                fetch_fn = _fetch_one_sw
 
             with ThreadPoolExecutor(max_workers=Config.PLATE_CONS_MAX_WORKERS) as executor:
-                futures = {executor.submit(_fetch_one, code, name): (code, name)
+                futures = {executor.submit(fetch_fn, code, name): (code, name)
                            for code, name in plates_to_fetch}
                 for future in as_completed(futures):
                     plate_name, codes = future.result()

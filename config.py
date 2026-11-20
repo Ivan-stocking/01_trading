@@ -136,6 +136,17 @@ COLUMN_MAP_SW = {
     '成交量': 'volume', '最高价': 'high', '最低价': 'low',
 }
 
+# 东方财富行业板块列名映射（stock_board_industry_name_em 返回）
+COLUMN_MAP_EM_PLATE = {
+    '板块名称': 'name', '板块代码': 'code',
+    '最新价': 'current_price', '涨跌幅': 'change_percent',
+    '涨跌额': 'change_amount', '总市值': 'total_market_cap',
+    '换手率': 'turnover', '上涨家数': 'rising_count',
+    '下跌家数': 'falling_count', '领涨股票': 'leading_stock',
+    '领涨股票-涨跌幅': 'leading_stock_change',
+    '领涨股票-代码': 'leading_stock_code',
+}
+
 
 def rename_columns(df, column_map):
     """重命名 DataFrame 列，只重命名实际存在的列，忽略缺失的"""
